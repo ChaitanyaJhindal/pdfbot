@@ -15,6 +15,7 @@ pypdf==5.9.0
 # Text processing and AI
 langchain-text-splitters==0.2.2
 langchain-core>=0.2.22
+langchain>=0.2.6
 langgraph==0.1.14
 
 # AI services
