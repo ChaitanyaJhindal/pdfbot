@@ -1,0 +1,13 @@
+# Minimal requirements for Vercel deployment
+fastapi==0.104.1
+uvicorn==0.24.0
+python-multipart==0.0.6
+requests==2.31.0
+python-dotenv==1.0.0
+pypdf==5.9.0
+openai==1.98.0
+pinecone-client==3.2.2
+langchain-text-splitters==0.2.2
+langchain-core==0.2.10
+langgraph==0.1.14
+pydantic>=2.5.0
