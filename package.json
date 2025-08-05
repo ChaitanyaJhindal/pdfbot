@@ -1,0 +1,12 @@
+{
+  "name": "pdf-chatbot-api",
+  "version": "1.0.0",
+  "description": "PDF Chatbot API for HackRx 6.0 Competition",
+  "scripts": {
+    "dev": "python main.py",
+    "start": "python main.py"
+  },
+  "keywords": ["fastapi", "pdf", "chatbot", "ai", "hackrx"],
+  "author": "Your Name",
+  "license": "MIT"
+}

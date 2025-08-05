@@ -1,0 +1,31 @@
+# Required packages for the Advanced PDF Chatbot
+
+# PDF processing
+pypdf==5.9.0
+
+# Text processing and splitting
+langchain-text-splitters==0.2.2
+langchain==0.2.6
+
+# LangGraph for workflow management
+langgraph==0.1.14
+
+# OpenAI API client
+openai==1.98.0
+
+# Pinecone vector database client
+pinecone-client==3.2.2
+
+# Environment variable management
+python-dotenv==1.0.0
+
+# FastAPI and web service dependencies
+fastapi==0.104.1
+uvicorn==0.24.0
+python-multipart==0.0.6
+
+# HTTP requests for downloading PDFs
+requests==2.31.0
+
+# Additional dependencies that might be needed
+typing-extensions==4.8.0

@@ -1,0 +1,37 @@
+# Vercel ignore file
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.mypy_cache
+.pytest_cache
+.hypothesis
+
+# Local development files
+temp_pdfs/
+*.pdf
+pdf_chatbot.log
+
+# Docker files (not needed for Vercel)
+Dockerfile*
+docker-compose.yml
+
+# Other deployment files
+Procfile
+HACKRX_DEPLOYMENT.md
