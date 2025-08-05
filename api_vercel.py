@@ -12,10 +12,46 @@ from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from advanced_pdf_bot import PDFChatbot, setup_logging
+from advanced_pdf_bot import PDFChatbot
 
-# Setup logging with reduced verbosity for Vercel
-setup_logging("WARNING")  # Reduce log level for serverless
+# Setup Vercel-specific logging (no file output)
+def setup_vercel_logging():
+    """Set up logging for Vercel serverless environment (console only)."""
+    import sys
+    
+    # Create a custom stream handler for console output only
+    class VercelStreamHandler(logging.StreamHandler):
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                # Replace Unicode emojis with simple text
+                msg = msg.replace('🔍', '[SEARCH]')
+                msg = msg.replace('✅', '[SUCCESS]')
+                msg = msg.replace('🤔', '[THINKING]')
+                msg = msg.replace('❌', '[ERROR]')
+                msg = msg.replace('⚠️', '[WARNING]')
+                
+                stream = self.stream
+                stream.write(msg + self.terminator)
+                self.flush()
+            except Exception:
+                pass  # Silent fail for serverless
+    
+    # Configure logging with console-only output
+    logging.basicConfig(
+        level=logging.WARNING,  # Reduced verbosity for serverless
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[VercelStreamHandler(sys.stdout)],
+        force=True
+    )
+    
+    # Reduce noise from external libraries
+    logging.getLogger("httpx").setLevel(logging.ERROR)
+    logging.getLogger("openai").setLevel(logging.ERROR)
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
+
+# Setup logging for Vercel
+setup_vercel_logging()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
