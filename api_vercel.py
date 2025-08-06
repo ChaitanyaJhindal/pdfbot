@@ -8,9 +8,10 @@ import logging
 import requests
 import tempfile
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Depends, status, Response
+from fastapi import FastAPI, HTTPException, Depends, status, Response, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from advanced_pdf_bot import PDFChatbot
 
@@ -60,7 +61,30 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Add CORS middleware with explicit configuration
+# Custom CORS middleware for better control
+@app.middleware("http")
+async def cors_middleware(request: Request, call_next):
+    # Handle preflight requests
+    if request.method == "OPTIONS":
+        response = JSONResponse(content={"message": "OK"})
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Max-Age"] = "3600"
+        return response
+    
+    # Process the request
+    response = await call_next(request)
+    
+    # Add CORS headers to all responses
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
+
+# Add standard CORS middleware as backup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins
@@ -68,16 +92,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],  # Explicitly include OPTIONS
     allow_headers=["*"],  # Allow all headers
 )
-
-# Add explicit OPTIONS handler for preflight requests
-@app.options("/hackrx/run")
-async def hackrx_options(response: Response):
-    """Handle CORS preflight requests."""
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    response.headers["Access-Control-Max-Age"] = "3600"
-    return {"message": "CORS preflight successful"}
 
 # Authentication setup
 security = HTTPBearer()
@@ -157,21 +171,20 @@ async def health():
     """Additional health check endpoint."""
     return {"status": "ok", "platform": "vercel"}
 
+@app.get("/test-cors")
+async def test_cors():
+    """Test endpoint to verify CORS is working."""
+    return {"message": "CORS test successful", "timestamp": "2025-08-06"}
+
 @app.post("/hackrx/run", response_model=HackRxResponse)
 async def hackrx_endpoint(
     request: HackRxRequest,
-    response: Response,
     token: str = Depends(verify_token)
 ):
     """
     HackRx 6.0 competition endpoint.
     Process a document from URL and answer questions about it.
     """
-    # Add explicit CORS headers
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    
     try:
         logger.info(f"Processing HackRx request with {len(request.questions)} questions")
         
