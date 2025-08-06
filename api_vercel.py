@@ -61,36 +61,13 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Custom CORS middleware for better control
-@app.middleware("http")
-async def cors_middleware(request: Request, call_next):
-    # Handle preflight requests
-    if request.method == "OPTIONS":
-        response = JSONResponse(content={"message": "OK"})
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-        response.headers["Access-Control-Max-Age"] = "3600"
-        return response
-    
-    # Process the request
-    response = await call_next(request)
-    
-    # Add CORS headers to all responses
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    response.headers["Access-Control-Allow-Credentials"] = "true"
-    
-    return response
-
-# Add standard CORS middleware as backup
+# Simple and direct CORS configuration that works with Vercel
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],  # Explicitly include OPTIONS
-    allow_headers=["*"],  # Allow all headers
+    allow_origins=["*"],
+    allow_credentials=False,  # Set to False when using allow_origins=["*"]
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Authentication setup
@@ -175,6 +152,11 @@ async def health():
 async def test_cors():
     """Test endpoint to verify CORS is working."""
     return {"message": "CORS test successful", "timestamp": "2025-08-06"}
+
+@app.options("/hackrx/run")
+async def hackrx_options():
+    """Handle preflight OPTIONS request for hackrx endpoint."""
+    return {"status": "ok"}
 
 @app.post("/hackrx/run", response_model=HackRxResponse)
 async def hackrx_endpoint(
