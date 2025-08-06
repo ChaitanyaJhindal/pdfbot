@@ -28,14 +28,6 @@ from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
-# Try to import sentence-transformers for local embeddings
-try:
-    from sentence_transformers import SentenceTransformer
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
-    SentenceTransformer = None
-
 
 def setup_logging(log_level: str = "INFO"):
     """
@@ -93,12 +85,8 @@ load_dotenv()
 
 # Configuration - fetch API keys from environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "gcp-starter")  # Default environment
-
-# For embeddings, we need a real OpenAI key since Groq doesn't support embeddings
-OPENAI_EMBEDDING_KEY = os.getenv("OPENAI_EMBEDDING_KEY", OPENAI_API_KEY)
 
 # Validate that all required environment variables are set
 if not OPENAI_API_KEY:
@@ -107,65 +95,14 @@ if not PINECONE_API_KEY:
     raise ValueError("PINECONE_API_KEY not found in environment variables")
 
 # Initialize clients
-# Groq client for LLM (chat completions)
-groq_client = openai.OpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url=OPENAI_BASE_URL
-)
-
-# OpenAI client for embeddings (since Groq doesn't support embeddings)
-# If OPENAI_EMBEDDING_KEY is the same as OPENAI_API_KEY (Groq key), 
-# we'll use HuggingFace embeddings instead
-if OPENAI_EMBEDDING_KEY.startswith("gsk_"):
-    # This is a Groq key, use HuggingFace embeddings
-    USE_OPENAI_EMBEDDINGS = False
-    embedding_client = None
-else:
-    # This is an OpenAI key, use OpenAI embeddings
-    USE_OPENAI_EMBEDDINGS = True
-    embedding_client = openai.OpenAI(api_key=OPENAI_EMBEDDING_KEY)
-
+openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 pinecone_client = Pinecone(api_key=PINECONE_API_KEY)
 
-# Global constants - Updated for Groq compatibility
-EMBEDDING_MODEL = "text-embedding-3-small" if USE_OPENAI_EMBEDDINGS else "sentence-transformers/all-MiniLM-L6-v2"
-LLM_MODEL = "llama-3.1-70b-versatile"  # Groq's powerful model
+# Global constants
+EMBEDDING_MODEL = "text-embedding-3-small"  # More cost-effective than ada-002
+LLM_MODEL = "gpt-4o-mini"  # Cost-effective GPT-4 model
 PINECONE_INDEX_NAME = "pdf-chatbot-index"
-EMBEDDING_DIMENSION = 1536 if USE_OPENAI_EMBEDDINGS else 384  # Different dimensions for different models
-
-# Initialize embedding model for local embeddings if needed
-local_embedding_model = None
-if not USE_OPENAI_EMBEDDINGS and SENTENCE_TRANSFORMERS_AVAILABLE:
-    local_embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-
-def get_embeddings(texts: List[str]) -> List[List[float]]:
-    """Get embeddings for texts using either OpenAI or local model."""
-    if USE_OPENAI_EMBEDDINGS and embedding_client:
-        # Use OpenAI embeddings
-        response = embedding_client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=texts
-        )
-        return [item.embedding for item in response.data]
-    elif local_embedding_model:
-        # Use local sentence transformer
-        embeddings = local_embedding_model.encode(texts)
-        return embeddings.tolist()
-    else:
-        # Fallback - use Groq (though it doesn't support embeddings)
-        # This will likely fail, but we'll try anyway
-        try:
-            response = groq_client.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=texts
-            )
-            return [item.embedding for item in response.data]
-        except Exception as e:
-            raise ValueError(f"No embedding service available. OpenAI: {USE_OPENAI_EMBEDDINGS}, Local: {SENTENCE_TRANSFORMERS_AVAILABLE}, Error: {e}")
-
-def get_single_embedding(text: str) -> List[float]:
-    """Get embedding for a single text."""
-    return get_embeddings([text])[0]
+EMBEDDING_DIMENSION = 1536  # Dimension for text-embedding-3-small
 
 # LangGraph State Definition
 class ProcessingState(TypedDict):
@@ -300,7 +237,7 @@ Page text:
 Text chunk:
 {text}"""
 
-        response = groq_client.chat.completions.create(
+        response = openai_client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant that creates concise, informative summaries."},
@@ -444,7 +381,10 @@ def embed_and_upsert_with_summaries(index, pages_text: Dict[int, str], page_chun
         print("Generated document summary")
         
         # Store document summary
-        doc_summary_embedding = get_single_embedding(doc_summary)
+        doc_summary_embedding = openai_client.embeddings.create(
+            input=[doc_summary],
+            model=EMBEDDING_MODEL
+        ).data[0].embedding
         
         # Upsert document summary
         index.upsert(vectors=[{
@@ -471,7 +411,10 @@ def embed_and_upsert_with_summaries(index, pages_text: Dict[int, str], page_chun
             print(f"Generated summary for page {page_num}")
             
             # Create page summary embedding
-            page_summary_embedding = get_single_embedding(page_summary)
+            page_summary_embedding = openai_client.embeddings.create(
+                input=[page_summary],
+                model=EMBEDDING_MODEL
+            ).data[0].embedding
             
             # Add page summary vector
             vectors_to_upsert.append({
@@ -488,16 +431,19 @@ def embed_and_upsert_with_summaries(index, pages_text: Dict[int, str], page_chun
             
             # Generate embeddings for chunks
             if chunks:
-                chunk_embeddings = get_embeddings(chunks)
+                chunk_embeddings = openai_client.embeddings.create(
+                    input=chunks,
+                    model=EMBEDDING_MODEL
+                )
                 
                 # Create vectors for each chunk
-                for chunk_idx, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
+                for chunk_idx, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings.data)):
                     # Include previous page summary as context if available
                     prev_summary = page_summaries.get(page_num - 1, "") if page_num > 1 else ""
                     
                     vector = {
                         "id": f"{doc_id}-page-{page_num}-chunk-{chunk_idx}",
-                        "values": embedding,
+                        "values": embedding.embedding,
                         "metadata": {
                             "type": "chunk",
                             "text": chunk,
@@ -540,7 +486,10 @@ def check_query_relevance(index, query: str, doc_id: str) -> tuple[bool, str]:
     """
     try:
         # Generate embedding for the query
-        query_embedding = get_single_embedding(query)
+        query_embedding = openai_client.embeddings.create(
+            input=[query],
+            model=EMBEDDING_MODEL
+        ).data[0].embedding
         
         # Search for document summary
         search_results = index.query(
@@ -575,7 +524,7 @@ def check_query_relevance(index, query: str, doc_id: str) -> tuple[bool, str]:
             Answer only 'YES' or 'NO' followed by a brief explanation.
             """
             
-            response = groq_client.chat.completions.create(
+            response = openai_client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that determines query relevance."},
@@ -610,7 +559,10 @@ def get_relevant_context_enhanced(index, query: str, doc_id: str, top_k: int = 5
     """
     try:
         # Generate embedding for the query
-        query_embedding = get_single_embedding(query)
+        query_embedding = openai_client.embeddings.create(
+            input=[query],
+            model=EMBEDDING_MODEL
+        ).data[0].embedding
         
         # First, search for relevant page summaries
         page_summary_results = index.query(
@@ -736,7 +688,7 @@ Remember to respond ONLY in valid JSON format."""
         
         for attempt in range(max_retries):
             try:
-                response = groq_client.chat.completions.create(
+                response = openai_client.chat.completions.create(
                     model=LLM_MODEL,
                     messages=[
                         {"role": "system", "content": "You are a helpful AI assistant that answers questions based only on the provided context and ALWAYS responds in valid JSON format."},

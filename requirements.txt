@@ -21,7 +21,6 @@ langgraph==0.1.14
 # AI services
 openai==1.98.0
 pinecone-client==3.2.2
-sentence-transformers==5.0.0
 
 # Dependencies (let pip resolve versions)
 pydantic>=2.5.0
