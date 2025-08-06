@@ -8,7 +8,7 @@ import logging
 import requests
 import tempfile
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -60,14 +60,24 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Add CORS middleware
+# Add CORS middleware with explicit configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allow all origins
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],  # Explicitly include OPTIONS
+    allow_headers=["*"],  # Allow all headers
 )
+
+# Add explicit OPTIONS handler for preflight requests
+@app.options("/hackrx/run")
+async def hackrx_options(response: Response):
+    """Handle CORS preflight requests."""
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Max-Age"] = "3600"
+    return {"message": "CORS preflight successful"}
 
 # Authentication setup
 security = HTTPBearer()
@@ -150,12 +160,18 @@ async def health():
 @app.post("/hackrx/run", response_model=HackRxResponse)
 async def hackrx_endpoint(
     request: HackRxRequest,
+    response: Response,
     token: str = Depends(verify_token)
 ):
     """
     HackRx 6.0 competition endpoint.
     Process a document from URL and answer questions about it.
     """
+    # Add explicit CORS headers
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    
     try:
         logger.info(f"Processing HackRx request with {len(request.questions)} questions")
         
