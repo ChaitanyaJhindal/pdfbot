@@ -71,7 +71,7 @@ if __name__ == "__main__":
     print("Testing with 2 questions first...")
     
     # Test the actual Vercel deployment
-    vercel_url = "https://pdfbot-5oxs-4y0puw2oy-chaitanyavedansh-gmailcoms-projects.vercel.app"
+    vercel_url = "https://pdfbot-dkc0p0tqa-chaitanyavedansh-gmailcoms-projects.vercel.app"
     print(f"\nTesting Vercel deployment: {vercel_url}")
     success = test_vercel_api(vercel_url, small_test)  # Use the small_test payload
     

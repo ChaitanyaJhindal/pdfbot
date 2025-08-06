@@ -745,29 +745,17 @@ Remember to respond ONLY in valid JSON format."""
 
 
 def check_relevance_node(state: ProcessingState) -> ProcessingState:
-    """Check if the query is relevant to the document."""
+    """Skip relevance check - assume all queries are relevant for speed."""
     import logging
     logger = logging.getLogger(__name__)
     
-    logger.info("🔍 Checking query relevance...")
+    logger.info("⚡ Skipping relevance check for speed...")
     
-    try:
-        index = pinecone_client.Index(PINECONE_INDEX_NAME)
-        is_relevant, doc_summary = check_query_relevance(index, state["query"], state["doc_id"])
-        
-        state["should_process"] = is_relevant
-        state["document_summary"] = doc_summary
-        
-        if is_relevant:
-            logger.info("✅ Query is relevant to the document")
-        else:
-            logger.info("❌ Query is not relevant to the document")
-            
-    except Exception as e:
-        logger.error(f"Error in relevance checking: {e}")
-        state["error"] = str(e)
-        state["should_process"] = False
-        
+    # Always assume relevant and proceed to search
+    state["should_process"] = True
+    state["document_summary"] = "Document processed (relevance check skipped for speed)"
+    
+    logger.info("✅ Proceeding directly to context search")
     return state
 
 
@@ -933,14 +921,49 @@ class PDFChatbot:
         # Create chunks by page
         page_chunks = get_text_chunks_by_page(pages_text)
         
-        # Generate embeddings and upsert with summaries
-        self.logger.info(f"🔄 Processing document with ID: {self.doc_id}")
-        doc_summary, page_summaries = embed_and_upsert_with_summaries(
-            self.index, pages_text, page_chunks, self.doc_id
-        )
+        # Generate embeddings and upsert (simple mode - no summaries for speed)
+        self.logger.info(f"⚡ Processing document with ID: {self.doc_id} (fast mode)")
         
-        self.document_summary = doc_summary
-        self.logger.info("✅ Document processing completed!")
+        # Simple embedding without summaries
+        vectors_to_upsert = []
+        
+        for page_num in sorted(page_chunks.keys()):
+            page_text = pages_text[page_num]
+            chunks = page_chunks[page_num]
+            
+            # Generate embeddings for chunks only
+            if chunks:
+                chunk_embeddings = openai_client.embeddings.create(
+                    input=chunks,
+                    model=EMBEDDING_MODEL
+                )
+                
+                # Create vectors for each chunk
+                for chunk_idx, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings.data)):
+                    vector = {
+                        "id": f"{self.doc_id}-page-{page_num}-chunk-{chunk_idx}",
+                        "values": embedding.embedding,
+                        "metadata": {
+                            "type": "chunk",
+                            "text": chunk,
+                            "doc_id": self.doc_id,
+                            "page_number": page_num,
+                            "chunk_index": chunk_idx,
+                            "full_page_text": page_text
+                        }
+                    }
+                    vectors_to_upsert.append(vector)
+            
+            self.logger.info(f"Processed page {page_num} with {len(chunks)} chunks")
+        
+        # Upsert vectors in batches
+        batch_size = 100
+        for i in range(0, len(vectors_to_upsert), batch_size):
+            batch = vectors_to_upsert[i:i + batch_size]
+            self.index.upsert(vectors=batch)
+        
+        self.document_summary = "Document processed in fast mode"
+        self.logger.info(f"✅ Document processing completed! Upserted {len(vectors_to_upsert)} vectors")
         
     def ask_question(self, query: str) -> dict:
         """Ask a question using the LangGraph workflow."""
