@@ -11,12 +11,12 @@ services:
       - key: PINECONE_API_KEY  
         sync: false
       - key: PINECONE_ENVIRONMENT
-        value: gcp-starter
+        value: us-east-1
       - key: HACKRX_API_KEY
         value: hackrx_2024_secret_key
       - key: LOG_LEVEL
         value: INFO
       - key: ENVIRONMENT
-        value: hackrx
+        value: production
       - key: PYTHON_VERSION
         value: 3.11.0

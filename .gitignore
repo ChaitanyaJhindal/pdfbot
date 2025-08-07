@@ -45,3 +45,15 @@ Thumbs.db
 
 # Docker
 .dockerignore
+
+# Vercel
+.vercel
+.vercel/
+
+# Deployment files (removed for Vercel)
+build.sh
+start.py
+render.yaml
+DEPLOYMENT.md
+Dockerfile
+Procfile.alt
