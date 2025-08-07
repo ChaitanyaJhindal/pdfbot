@@ -8,10 +8,8 @@ import logging
 import requests
 import tempfile
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Depends, status, Response, Request
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from advanced_pdf_bot import PDFChatbot
 
@@ -61,28 +59,19 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Basic CORS middleware - keep it simple
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Authentication setup
-security = HTTPBearer()
+# Simple authentication - optional for testing
+security = HTTPBearer(auto_error=False)
 API_KEY = os.getenv("HACKRX_API_KEY", "hackrx_2024_secret_key")
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Verify the bearer token."""
-    if credentials.credentials != API_KEY:
+    """Verify the bearer token - optional for testing."""
+    # Make authentication optional for simplicity
+    if credentials and credentials.credentials != API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials",
-            headers={"WWW-Authenticate": "Bearer"},
         )
-    return credentials.credentials
+    return credentials.credentials if credentials else None
 
 # Request/Response models for HackRx competition
 class HackRxRequest(BaseModel):
