@@ -8,8 +8,8 @@ import shutil
 import logging
 import requests
 import tempfile
-from typing import List, Optional, Dict, Any
-from fastapi import FastAPI, HTTPException, status, Depends, Request
+from typing import List, Optional, Dict, Any, Union
+from fastapi import FastAPI, HTTPException, status, Depends, Request, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
@@ -132,6 +132,33 @@ class HackRxRequest(BaseModel):
         
         return cleaned_questions
 
+# New model for file upload requests
+class FileUploadRequest(BaseModel):
+    """Request model for file upload with questions."""
+    questions: List[str] = Field(
+        ..., 
+        min_items=1,
+        max_items=20,
+        description="List of questions to ask about the uploaded document"
+    )
+    
+    @validator('questions')
+    def validate_questions(cls, v):
+        """Validate questions list."""
+        if not v:
+            raise ValueError("At least one question is required")
+        
+        cleaned_questions = []
+        for q in v:
+            if not q or not q.strip():
+                continue
+            cleaned_questions.append(q.strip())
+        
+        if not cleaned_questions:
+            raise ValueError("At least one non-empty question is required")
+        
+        return cleaned_questions
+
 class HackRxResponse(BaseModel):
     """Response model matching exact HackRx specification."""
     answers: List[str] = Field(
@@ -216,25 +243,88 @@ def download_pdf_from_url(url: str) -> str:
             detail=f"Unexpected error downloading document: {str(e)}"
         )
 
-def process_document_and_get_chatbot(document_url: str) -> PDFChatbot:
+def save_uploaded_file(upload_file: UploadFile) -> str:
     """
-    Process a document from URL and return a chatbot instance.
-    Optimized for hackathon with caching and performance monitoring.
-    """
-    # Generate cache key from URL
-    cache_key = document_url
+    Save uploaded file to temporary directory.
     
-    # Check if we already have a chatbot for this URL (hackathon optimization)
+    Args:
+        upload_file: FastAPI UploadFile object
+        
+    Returns:
+        str: Path to saved temporary file
+    """
+    try:
+        logger.info(f"📁 Saving uploaded file: {upload_file.filename}")
+        
+        # Validate file type
+        if not upload_file.filename.lower().endswith('.pdf'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only PDF files are supported. Please upload a .pdf file."
+            )
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf', dir=TEMP_DIR) as temp_file:
+            temp_path = temp_file.name
+            
+            # Write uploaded content to temp file
+            content = upload_file.file.read()
+            temp_file.write(content)
+            
+            # Validate file size
+            file_size = len(content)
+            max_size = 50 * 1024 * 1024  # 50MB limit
+            if file_size > max_size:
+                os.remove(temp_path)
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File too large. Maximum size is {max_size/1024/1024:.0f}MB"
+                )
+            
+            logger.info(f"✅ File saved: {file_size/1024/1024:.2f}MB to {temp_path}")
+            return temp_path
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error saving uploaded file: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing uploaded file: {str(e)}"
+        )
+
+def process_document_and_get_chatbot(document_source: Union[str, UploadFile], source_type: str = "url") -> PDFChatbot:
+    """
+    Process a document from URL or uploaded file and return a chatbot instance.
+    Optimized for hackathon with caching and performance monitoring.
+    
+    Args:
+        document_source: Either URL string or UploadFile object
+        source_type: "url" or "upload" to indicate source type
+    """
+    # Generate cache key based on source type
+    if source_type == "url":
+        cache_key = document_source  # URL string
+        document_identifier = document_source
+    else:
+        # For uploaded files, use filename + size as cache key
+        cache_key = f"upload_{getattr(document_source, 'filename', 'unknown')}_{getattr(document_source, 'size', 0)}"
+        document_identifier = f"uploaded file: {getattr(document_source, 'filename', 'unknown')}"
+    
+    # Check if we already have a chatbot for this document (hackathon optimization)
     if cache_key in chatbots:
         logger.info(f"🚀 Using cached chatbot for document")
         return chatbots[cache_key]
     
     try:
         start_time = time.time()
-        logger.info("🤖 Creating new chatbot instance...")
+        logger.info(f"🤖 Creating new chatbot instance for {document_identifier}")
         
-        # Download PDF
-        pdf_path = download_pdf_from_url(document_url)
+        # Get PDF path based on source type
+        if source_type == "url":
+            pdf_path = download_pdf_from_url(document_source)
+        else:
+            pdf_path = save_uploaded_file(document_source)
         
         # Create and setup chatbot with hackathon optimizations
         chatbot = PDFChatbot(pdf_path, force_reprocess=False)
@@ -320,7 +410,7 @@ async def hackrx_endpoint(
         logger.info(f"📄 Document: {request.documents[:100]}...")
         
         # Process the document and get chatbot
-        chatbot = process_document_and_get_chatbot(request.documents)
+        chatbot = process_document_and_get_chatbot(request.documents, "url")
         
         # Process each question with detailed logging
         answers = []
@@ -375,6 +465,114 @@ async def hackrx_endpoint(
     except Exception as e:
         request_stats["failed_requests"] += 1
         logger.error(f"❌ Unexpected error in hackrx_endpoint: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}"
+        )
+
+@app.post("/upload",
+          response_model=HackRxResponse,
+          tags=["File Upload"],
+          summary="Upload PDF and answer questions",
+          description="Upload a PDF file and ask questions about it - alternative to URL-based processing")
+async def upload_pdf_endpoint(
+    file: UploadFile = File(..., description="PDF file to upload and process"),
+    questions: str = Form(..., description="JSON array of questions as string"),
+    auth_token: str = Depends(verify_hackrx_auth)
+):
+    """
+    File Upload Endpoint - Upload PDF and get answers to questions.
+    
+    This endpoint allows users to upload PDF files directly instead of providing URLs.
+    Questions should be provided as a JSON string in the form field.
+    """
+    start_time = time.time()
+    request_stats["total_requests"] += 1
+    
+    try:
+        # Parse questions from JSON string
+        import json
+        try:
+            questions_list = json.loads(questions)
+            if not isinstance(questions_list, list):
+                raise ValueError("Questions must be a JSON array")
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid questions format. Expected JSON array: {str(e)}"
+            )
+        
+        # Validate questions
+        if not questions_list or len(questions_list) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At least one question is required"
+            )
+        
+        if len(questions_list) > 20:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Maximum 20 questions allowed per request"
+            )
+        
+        logger.info(f"📁 Processing uploaded file: {file.filename} with {len(questions_list)} questions")
+        
+        # Process the uploaded file and get chatbot
+        chatbot = process_document_and_get_chatbot(file, "upload")
+        
+        # Process each question
+        answers = []
+        for i, question in enumerate(questions_list):
+            question_start = time.time()
+            logger.info(f"❓ Question {i+1}/{len(questions_list)}: {question[:100]}...")
+            
+            try:
+                # Get answer from chatbot
+                answer_data = chatbot.ask_question(question)
+                
+                # Extract and clean the answer text
+                if isinstance(answer_data, dict):
+                    answer_text = answer_data.get('answer', 'No answer could be generated.')
+                elif isinstance(answer_data, str):
+                    answer_text = answer_data
+                else:
+                    answer_text = str(answer_data)
+                
+                # Clean up the answer
+                answer_text = answer_text.strip()
+                if not answer_text:
+                    answer_text = "Unable to generate an answer for this question."
+                
+                answers.append(answer_text)
+                
+                question_time = time.time() - question_start
+                logger.info(f"✅ Answer {i+1} ready ({question_time:.2f}s): {answer_text[:100]}...")
+                
+            except Exception as e:
+                logger.error(f"❌ Error processing question {i+1}: {e}")
+                error_answer = f"Error processing question: {str(e)}"
+                answers.append(error_answer)
+        
+        # Calculate performance metrics
+        total_time = time.time() - start_time
+        request_stats["successful_requests"] += 1
+        request_stats["average_response_time"] = (
+            (request_stats["average_response_time"] * (request_stats["successful_requests"] - 1) + total_time) /
+            request_stats["successful_requests"]
+        )
+        
+        logger.info(f"🏁 Upload request completed: {len(answers)} answers in {total_time:.2f}s")
+        
+        # Return response in same format as HackRx endpoint
+        return HackRxResponse(answers=answers)
+        
+    except HTTPException as e:
+        request_stats["failed_requests"] += 1
+        logger.error(f"❌ HTTP Exception in upload endpoint: {e.detail}")
+        raise e
+    except Exception as e:
+        request_stats["failed_requests"] += 1
+        logger.error(f"❌ Unexpected error in upload endpoint: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}"

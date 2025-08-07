@@ -965,6 +965,9 @@ class PDFChatbot:
 
 
 if __name__ == "__main__":
+    import sys
+    import argparse
+    
     # Setup logging
     setup_logging("INFO")
     logger = logging.getLogger(__name__)
@@ -972,23 +975,69 @@ if __name__ == "__main__":
     print("🤖 Advanced PDF Chatbot with LangGraph")
     print("=" * 50)
     
-    # User Input - PDF file path
-    pdf_path = r"C:\Users\Chait\Downloads\Chaitanya_jhindal_PS2_final_report (1).pdf"
+    # Set up command line argument parsing
+    parser = argparse.ArgumentParser(description="Advanced PDF Chatbot with LangGraph")
+    parser.add_argument(
+        "--pdf", 
+        type=str, 
+        help="Path to the PDF file to process"
+    )
+    parser.add_argument(
+        "--force-reprocess", 
+        action="store_true", 
+        help="Force reprocessing of the document even if it exists in the index"
+    )
+    
+    args = parser.parse_args()
+    
+    # Get PDF file path
+    pdf_path = args.pdf
+    
+    if not pdf_path:
+        print("📁 No PDF file specified. Please provide a PDF file.")
+        print("\nOptions:")
+        print("1. Use command line: python advanced_pdf_bot.py --pdf \"path/to/your/file.pdf\"")
+        print("2. Enter path interactively")
+        print()
+        
+        # Interactive file path input
+        while True:
+            pdf_path = input("Enter the path to your PDF file: ").strip()
+            
+            if not pdf_path:
+                print("❌ Please enter a valid file path.")
+                continue
+                
+            # Remove quotes if user added them
+            pdf_path = pdf_path.strip('"').strip("'")
+            
+            # Check if file exists
+            if os.path.exists(pdf_path):
+                if pdf_path.lower().endswith('.pdf'):
+                    break
+                else:
+                    print("❌ File must be a PDF (.pdf extension required).")
+                    continue
+            else:
+                print(f"❌ File not found: {pdf_path}")
+                print("Please check the file path and try again.")
+                continue
     
     print(f"Processing PDF: {pdf_path}")
     logger.info(f"Starting PDF chatbot with file: {pdf_path}")
     
-    # Check if file exists
+    # Final check if file exists
     if not os.path.exists(pdf_path):
         error_msg = f"❌ Error: PDF file not found at {pdf_path}"
         print(error_msg)
         logger.error(error_msg)
         print("Please check the file path and try again.")
-        exit(1)
+        sys.exit(1)
     
     try:
-        # Initialize the chatbot (set force_reprocess=True for development)
-        chatbot = PDFChatbot(pdf_path, force_reprocess=False)
+        # Initialize the chatbot
+        force_reprocess = args.force_reprocess if args.force_reprocess else False
+        chatbot = PDFChatbot(pdf_path, force_reprocess=force_reprocess)
         
         # Setup index and process document
         chatbot.setup_index()
@@ -1002,7 +1051,10 @@ if __name__ == "__main__":
         print("- ✅ Summary-enhanced responses with citations")
         print("- ✅ Persistent vector storage")
         print("- ✅ Enhanced error handling and logging")
-        print("Type 'quit' or 'exit' to stop the chatbot.")
+        print("\nCommands:")
+        print("- Type your question to get an answer")
+        print("- Type 'quit', 'exit', or 'q' to stop the chatbot")
+        print("- Type 'help' for more options")
         print("-" * 50)
         
         while True:
@@ -1015,8 +1067,36 @@ if __name__ == "__main__":
                 logger.info("User ended session")
                 break
             
+            # Help command
+            if user_query.lower() in ['help', 'h']:
+                print("\n📖 Available Commands:")
+                print("- Ask any question about the PDF document")
+                print("- 'quit', 'exit', 'q' - Exit the chatbot")
+                print("- 'help', 'h' - Show this help message")
+                print("- 'info' - Show document information")
+                print("- 'stats' - Show session statistics")
+                continue
+            
+            # Info command
+            if user_query.lower() == 'info':
+                print(f"\n📄 Document Information:")
+                print(f"- File: {os.path.basename(pdf_path)}")
+                print(f"- Full path: {pdf_path}")
+                print(f"- Document ID: {chatbot.doc_id}")
+                if chatbot.document_summary:
+                    print(f"- Summary: {chatbot.document_summary[:200]}...")
+                continue
+            
+            # Stats command
+            if user_query.lower() == 'stats':
+                print(f"\n📊 Session Statistics:")
+                print(f"- Current document: {os.path.basename(pdf_path)}")
+                print(f"- Force reprocess: {force_reprocess}")
+                print(f"- Index newly created: {chatbot.is_newly_created}")
+                continue
+            
             if not user_query:
-                print("Please enter a valid question.")
+                print("Please enter a valid question or command.")
                 continue
             
             print("\n🔄 Processing your question...")
@@ -1056,3 +1136,4 @@ if __name__ == "__main__":
         print(f"\n{error_msg}")
         logger.error(error_msg, exc_info=True)
         print("Please check your configuration and try again.")
+        sys.exit(1)

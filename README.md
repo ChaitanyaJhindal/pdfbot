@@ -1,16 +1,87 @@
 # Advanced PDF Chatbot with LangGraph
 
-An intelligent PDF chatbot that uses Pinecone for vector search, OpenAI LLM for generating answers, and LangGraph for efficient workflow management. This enhanced version includes smart relevance checking and page-aware processing to optimize API usage and improve response accuracy.
+An intelligent PDF chatbot that uses Pinecone for vector search, OpenAI LLM for generating answers, and LangGraph for efficient workflow management. This enhanced version includes smart relevance checking, multiple user interfaces, and flexible file input methods.
+
+## 🚀 Multiple Ways to Use
+
+### 1. **Web API** - For Integration & Remote Access
+```bash
+python api.py
+# Access at http://localhost:8000
+# Supports both URL and file upload
+```
+
+### 2. **Command Line Interface** - For Power Users
+```bash
+python chat_cli.py --pdf "your_document.pdf"
+# Interactive file selection available
+```
+
+### 3. **Graphical Interface** - For Easy Use
+```bash
+python chat_gui.py
+# User-friendly GUI with drag-and-drop
+```
+
+### 4. **Python Script** - For Developers
+```bash
+python advanced_pdf_bot.py --pdf "document.pdf"
+# Direct Python integration
+```
+
+## 📁 Flexible File Input
+
+**No more hardcoded paths!** The chatbot now supports:
+- ✅ **Command line arguments**: `--pdf "path/to/file.pdf"`
+- ✅ **Interactive selection**: Choose from files in current directory
+- ✅ **Manual path entry**: Enter any file path when prompted
+- ✅ **File uploads**: Upload files directly via web API
+- ✅ **URL processing**: Process PDFs from web URLs
+- ✅ **Relative/absolute paths**: Works with any valid file path
+- ✅ **Home directory**: Supports `~/Documents/file.pdf` syntax
 
 ## Enhanced Features
 
 - 📄 **Page-wise PDF processing**: Extract and process text page by page
 - 🧠 **Smart summary generation**: Document and page-level summaries for efficient filtering
-- � **Relevance checking**: Pre-filter queries using document summary to save API costs
+- 🔍 **Relevance checking**: Pre-filter queries using document summary to save API costs
 - 📖 **Page-aware context**: Enhanced context retrieval with page summaries and cross-page references
 - 🔄 **LangGraph workflow**: Efficient query processing pipeline with conditional logic
 - 💰 **API cost optimization**: Only process relevant queries to minimize OpenAI API usage
 - 🎯 **Targeted responses**: Page-specific context for more accurate answers
+- 🌐 **Web API**: RESTful API with file upload and URL processing
+- 💻 **Multiple interfaces**: CLI, GUI, API, and direct Python usage
+
+## 🚀 Quick Start
+
+### Option 1: Easy CLI (Recommended for beginners)
+```bash
+python chat_cli.py
+```
+The script will find PDF files in your current directory and let you choose, or you can enter any file path.
+
+### Option 2: Direct file processing
+```bash
+python chat_cli.py --pdf "path/to/your/document.pdf"
+```
+
+### Option 3: Graphical interface
+```bash
+python chat_gui.py
+```
+
+### Option 4: Web API
+```bash
+python api.py
+# Then visit http://localhost:8000/docs for the API interface
+```
+
+### Option 5: Traditional Python script
+```bash
+python advanced_pdf_bot.py --pdf "your_file.pdf"
+```
+
+📖 **See [USER_GUIDE.md](USER_GUIDE.md) for complete usage instructions and examples.**
 
 ## How It Works
 
