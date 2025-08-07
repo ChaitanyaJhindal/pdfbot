@@ -1,8 +1,0 @@
-# Minimal Vercel requirements - no conflicts
-fastapi==0.104.1
-uvicorn==0.24.0
-requests==2.31.0
-python-dotenv==1.0.0
-pypdf==3.0.1
-openai==1.54.0
-pydantic==2.5.0
