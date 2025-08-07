@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: hackrx-pdf-chatbot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT --workers 1
+    plan: free
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY  
+        sync: false
+      - key: PINECONE_ENVIRONMENT
+        value: gcp-starter
+      - key: HACKRX_API_KEY
+        value: hackrx_2024_secret_key
+      - key: LOG_LEVEL
+        value: INFO
+      - key: ENVIRONMENT
+        value: hackrx
+      - key: PYTHON_VERSION
+        value: 3.11.0
