@@ -9,8 +9,7 @@ import logging
 import requests
 import tempfile
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 import uvicorn
@@ -30,24 +29,12 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Authentication setup
-security = HTTPBearer()
-API_KEY = os.getenv("HACKRX_API_KEY", "hackrx_2024_secret_key")  # Set your API key here
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Verify the bearer token."""
-    if credentials.credentials != API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return credentials.credentials
 
 # Request/Response models for HackRx competition
 class HackRxRequest(BaseModel):
@@ -143,18 +130,14 @@ async def root():
     return {"message": "PDF Chatbot API for HackRx 6.0 is running", "status": "healthy"}
 
 @app.post("/hackrx/run", response_model=HackRxResponse)
-async def hackrx_endpoint(
-    request: HackRxRequest,
-    token: str = Depends(verify_token)
-):
+async def hackrx_endpoint(request: HackRxRequest):
     """
     HackRx 6.0 competition endpoint.
     Process a document from URL and answer questions about it.
     
     Args:
         request: HackRxRequest containing document URL and questions
-        token: Bearer token for authentication
-        
+    
     Returns:
         HackRxResponse: Answers to the questions
     """
