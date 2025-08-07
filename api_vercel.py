@@ -8,8 +8,9 @@ import logging
 import requests
 import tempfile
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from advanced_pdf_bot import PDFChatbot
 
@@ -57,6 +58,15 @@ app = FastAPI(
     title="PDF Chatbot API - HackRx 6.0",
     description="AI-powered PDF question-answering service for HackRx competition",
     version="1.0.0"
+)
+
+# Add CORS middleware - required for browser requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 # Simple authentication - optional for testing
@@ -136,6 +146,18 @@ async def root():
 async def health():
     """Additional health check endpoint."""
     return {"status": "ok", "platform": "vercel"}
+
+@app.options("/hackrx/run")
+async def hackrx_options():
+    """Handle preflight CORS requests for the main endpoint."""
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
 
 @app.post("/hackrx/run", response_model=HackRxResponse)
 async def hackrx_endpoint(
