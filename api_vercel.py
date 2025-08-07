@@ -61,11 +61,11 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Simple and direct CORS configuration that works with Vercel
+# Simple CORS setup that definitely works
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,  # Set to False when using allow_origins=["*"]
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -151,12 +151,7 @@ async def health():
 @app.get("/test-cors")
 async def test_cors():
     """Test endpoint to verify CORS is working."""
-    return {"message": "CORS test successful", "timestamp": "2025-08-06"}
-
-@app.options("/hackrx/run")
-async def hackrx_options():
-    """Handle preflight OPTIONS request for hackrx endpoint."""
-    return {"status": "ok"}
+    return {"message": "CORS test successful", "timestamp": "2025-08-07"}
 
 @app.post("/hackrx/run", response_model=HackRxResponse)
 async def hackrx_endpoint(
