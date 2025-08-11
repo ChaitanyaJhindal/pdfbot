@@ -402,15 +402,12 @@ async def hackrx_endpoint(
             logger.info(f"❓ Question {i+1}/{len(request.questions)}: {question[:100]}...")
 
             try:
-                # Get answer from chatbot, which is now a direct string
-                answer_text = chatbot.ask_question(question)
+                # Always query the LLM for an answer
+                logger.info(f"🔄 Querying LLM for question {i+1}")
+                answer_text = query_llm_for_answer(question)
 
-                # Clean up the answer
-                answer_text = answer_text.strip()
-                if not answer_text or "doesn't seem to be related" in answer_text:
-                    # Fallback to LLM for external knowledge
-                    logger.info(f"🔄 Fallback to LLM for question {i+1}")
-                    answer_text = query_llm_for_answer(question)
+                # Log the final answer
+                logger.info(f"✅ Final answer for question {i+1}: {answer_text[:100]}...")
 
                 answers.append(answer_text)
 
