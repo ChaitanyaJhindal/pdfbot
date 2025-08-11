@@ -66,7 +66,7 @@ app.add_middleware(CORSMiddleware, **cors_config)
 
 # Authentication setup for hackathon
 security = HTTPBearer(auto_error=False)
-HACKRX_API_KEY = os.getenv("HACKRX_API_KEY", "hackrx_2024_secret_key")
+HACKRX_API_KEY = os.getenv("HACKRX_API_KEY", "80a336acf61ef60c2dc539890a8d50fa768c132923754b0c4c77408ec177cfa8")
 
 def verify_hackrx_auth(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Verify Bearer token for HackRx competition."""
@@ -160,12 +160,11 @@ class FileUploadRequest(BaseModel):
         return cleaned_questions
 
 class HackRxResponse(BaseModel):
-    """Response model matching exact HackRx specification."""
+    """Response model matching exact HackRx specification (answers only)."""
     answers: List[str] = Field(
         ..., 
         description="List of answers corresponding to the input questions"
     )
-    questions: List[str]  # List of questions to answer
 
 # Global storage for chatbot instances (optimized for hackathon)
 chatbots = {}
@@ -180,17 +179,21 @@ request_stats = {
     "average_response_time": 0
 }
 
-def download_pdf_from_url(url: str) -> str:
+def download_document_from_url(url: str) -> str:
     """
     Download PDF from URL and save to temporary file.
     Optimized for hackathon with better error handling and logging.
     """
     try:
-        logger.info(f"📥 Downloading PDF from URL: {url[:100]}...")
+        logger.info(f"📥 Downloading document from URL: {url[:100]}...")
         start_time = time.time()
         
         # Create a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf', dir=TEMP_DIR) as temp_file:
+        # Choose suffix based on URL or content-type
+        guessed_ext = '.pdf'
+        if url.lower().endswith('.docx'):
+            guessed_ext = '.docx'
+        with tempfile.NamedTemporaryFile(delete=False, suffix=guessed_ext, dir=TEMP_DIR) as temp_file:
             temp_path = temp_file.name
             
             # Download the file with optimized settings for hackathon
@@ -210,8 +213,8 @@ def download_pdf_from_url(url: str) -> str:
             
             # Verify content type
             content_type = response.headers.get('content-type', '').lower()
-            if 'pdf' not in content_type and 'application/octet-stream' not in content_type:
-                logger.warning(f"⚠️  Content type might not be PDF: {content_type}")
+            if all(x not in content_type for x in ['pdf', 'vnd.openxmlformats-officedocument.wordprocessingml.document', 'octet-stream']):
+                logger.warning(f"⚠️  Unexpected content type: {content_type}")
             
             # Write content to temp file with progress tracking
             total_size = 0
@@ -220,7 +223,7 @@ def download_pdf_from_url(url: str) -> str:
                 total_size += len(chunk)
             
             download_time = time.time() - start_time
-            logger.info(f"✅ PDF downloaded successfully: {total_size/1024/1024:.2f}MB in {download_time:.2f}s")
+            logger.info(f"✅ Document downloaded successfully: {total_size/1024/1024:.2f}MB in {download_time:.2f}s")
             
             return temp_path
             
@@ -255,16 +258,17 @@ def save_uploaded_file(upload_file: UploadFile) -> str:
     """
     try:
         logger.info(f"📁 Saving uploaded file: {upload_file.filename}")
-        
+
         # Validate file type
-        if not upload_file.filename.lower().endswith('.pdf'):
+        if not (upload_file.filename.lower().endswith('.pdf') or upload_file.filename.lower().endswith('.docx')):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only PDF files are supported. Please upload a .pdf file."
+                detail="Only PDF and DOCX files are supported."
             )
-        
+
         # Create temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf', dir=TEMP_DIR) as temp_file:
+        suffix = '.docx' if upload_file.filename.lower().endswith('.docx') else '.pdf'
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=TEMP_DIR) as temp_file:
             temp_path = temp_file.name
             
             # Write uploaded content to temp file
@@ -283,7 +287,7 @@ def save_uploaded_file(upload_file: UploadFile) -> str:
             
             logger.info(f"✅ File saved: {file_size/1024/1024:.2f}MB to {temp_path}")
             return temp_path
-            
+
     except HTTPException:
         raise
     except Exception as e:
@@ -322,7 +326,7 @@ def process_document_and_get_chatbot(document_source: Union[str, UploadFile], so
         
         # Get PDF path based on source type
         if source_type == "url":
-            pdf_path = download_pdf_from_url(document_source)
+            pdf_path = download_document_from_url(document_source)
         else:
             pdf_path = save_uploaded_file(document_source)
         
@@ -419,16 +423,8 @@ async def hackrx_endpoint(
             logger.info(f"❓ Question {i+1}/{len(request.questions)}: {question[:100]}...")
             
             try:
-                # Get answer from chatbot
-                answer_data = chatbot.ask_question(question)
-                
-                # Extract and clean the answer text
-                if isinstance(answer_data, dict):
-                    answer_text = answer_data.get('answer', 'No answer could be generated.')
-                elif isinstance(answer_data, str):
-                    answer_text = answer_data
-                else:
-                    answer_text = str(answer_data)
+                # Get answer from chatbot, which is now a direct string
+                answer_text = chatbot.ask_question(question)
                 
                 # Clean up the answer
                 answer_text = answer_text.strip()
@@ -454,10 +450,10 @@ async def hackrx_endpoint(
         )
         
         logger.info(f"🏁 Request completed: {len(answers)} answers in {total_time:.2f}s")
-        
+
         # Return response in exact HackRx format
         return HackRxResponse(answers=answers)
-        
+
     except HTTPException as e:
         request_stats["failed_requests"] += 1
         logger.error(f"❌ HTTP Exception: {e.detail}")
@@ -469,6 +465,14 @@ async def hackrx_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}"
         )
+
+# Versioned aliases for API v1
+@app.post("/api/v1/hackrx/run", response_model=HackRxResponse, tags=["HackRx Competition"])
+async def hackrx_endpoint_v1(
+    request: HackRxRequest,
+    auth_token: str = Depends(verify_hackrx_auth)
+):
+    return await hackrx_endpoint(request, auth_token)
 
 @app.post("/upload",
           response_model=HackRxResponse,
@@ -528,15 +532,7 @@ async def upload_pdf_endpoint(
             
             try:
                 # Get answer from chatbot
-                answer_data = chatbot.ask_question(question)
-                
-                # Extract and clean the answer text
-                if isinstance(answer_data, dict):
-                    answer_text = answer_data.get('answer', 'No answer could be generated.')
-                elif isinstance(answer_data, str):
-                    answer_text = answer_data
-                else:
-                    answer_text = str(answer_data)
+                answer_text = chatbot.ask_question(question)
                 
                 # Clean up the answer
                 answer_text = answer_text.strip()
@@ -577,6 +573,14 @@ async def upload_pdf_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}"
         )
+
+@app.post("/api/v1/upload", response_model=HackRxResponse, tags=["File Upload"])
+async def upload_pdf_endpoint_v1(
+    file: UploadFile = File(..., description="PDF file to upload and process"),
+    questions: str = Form(..., description="JSON array of questions as string"),
+    auth_token: str = Depends(verify_hackrx_auth)
+):
+    return await upload_pdf_endpoint(file, questions, auth_token)
 
 # Hackathon cleanup on shutdown
 @app.on_event("shutdown")

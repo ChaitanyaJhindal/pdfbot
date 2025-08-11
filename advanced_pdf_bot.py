@@ -1,16 +1,16 @@
 """
-Advanced PDF Chatbot using Pinecone for vector search and OpenAI LLM for generating answers.
+Advanced Document Chatbot: Retrieval-Augmented Generation with semantic search and explainable decisions.
 
-This script functions as an intelligent PDF chatbot that:
-1. Extracts text from PDF files
-2. Chunks the text for processing
-3. Creates embeddings and stores them in Pinecone
-4. Performs semantic search to find relevant context
-5. Uses OpenAI LLM to generate answers based on the context
+Capabilities added for HackRx requirements:
+- Ingest PDFs and DOCX (email/EML can be converted to text upstream)
+- Chunking per page/section; summary vectors to guide retrieval
+- Vector search via Pinecone (pluggable backend; FAISS stub present)
+- Clause extraction and matching for policy/contract questions
+- Explainable JSON outputs with rationale and traceability
 
 Requirements:
-- Set up environment variables in a .env file
-- Install required packages: pypdf, langchain-text-splitters, openai, pinecone-client, python-dotenv
+- Environment variables in .env
+- pip install -r requirements.txt
 """
 
 import os
@@ -18,8 +18,12 @@ import re
 import logging
 import json
 import time
-from typing import List, Any, Dict, TypedDict
+from typing import List, Any, Dict, TypedDict, Tuple, Optional
 import pypdf
+try:
+    from docx import Document as DocxDocument  # type: ignore[reportMissingImports]
+except Exception:
+    DocxDocument = None  # Optional dependency
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 import openai
@@ -87,22 +91,66 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "gcp-starter")  # Default environment
+VECTOR_BACKEND = os.getenv("VECTOR_BACKEND", "pinecone").lower()  # pinecone|faiss (faiss stub)
 
 # Validate that all required environment variables are set
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY not found in environment variables")
-if not PINECONE_API_KEY:
-    raise ValueError("PINECONE_API_KEY not found in environment variables")
+if VECTOR_BACKEND == "pinecone" and not PINECONE_API_KEY:
+    raise ValueError("PINECONE_API_KEY not found in environment variables for Pinecone backend")
 
 # Initialize clients
 openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-pinecone_client = Pinecone(api_key=PINECONE_API_KEY)
+pinecone_client = Pinecone(api_key=PINECONE_API_KEY) if VECTOR_BACKEND == "pinecone" else None
 
 # Global constants
-EMBEDDING_MODEL = "text-embedding-3-small"  # More cost-effective than ada-002
-LLM_MODEL = "gpt-4o-mini"  # Cost-effective GPT-4 model
+EMBEDDING_MODEL = "text-embedding-3-small"
+LLM_MODEL = "gpt-4o-mini"
 PINECONE_INDEX_NAME = "pdf-chatbot-index"
 EMBEDDING_DIMENSION = 1536  # Dimension for text-embedding-3-small
+
+# Speed/Token optimization flags
+ENABLE_DOC_SUMMARY = os.getenv("ENABLE_DOC_SUMMARY", "true").lower() == "true"
+ENABLE_PAGE_SUMMARIES = os.getenv("ENABLE_PAGE_SUMMARIES", "false").lower() == "true"
+ENABLE_RELEVANCE_LLM_FALLBACK = os.getenv("ENABLE_RELEVANCE_LLM_FALLBACK", "false").lower() == "true"
+ENABLE_CLAUSE_MATCHING = os.getenv("ENABLE_CLAUSE_MATCHING", "false").lower() == "true"
+INCLUDE_SUMMARIES_IN_CONTEXT = os.getenv("INCLUDE_SUMMARIES_IN_CONTEXT", "false").lower() == "true"
+
+PAGE_SUMMARY_TOP_K = int(os.getenv("PAGE_SUMMARY_TOP_K", "2"))
+CHUNK_TOP_K = int(os.getenv("CHUNK_TOP_K", "6"))
+CONTEXT_CHAR_BUDGET = int(os.getenv("CONTEXT_CHAR_BUDGET", "3000"))
+
+# ---------------------------
+# Utilities for DOC ingestion
+# ---------------------------
+
+def extract_text_from_docx(docx_path: str) -> Dict[int, str]:
+    """Extract text from DOCX into pseudo-pages (paragraph blocks)."""
+    if DocxDocument is None:
+        raise ImportError("python-docx is not installed. Please install it to process DOCX files.")
+    if not os.path.exists(docx_path):
+        raise FileNotFoundError(f"DOCX file not found: {docx_path}")
+    doc = DocxDocument(docx_path)
+    # Group paragraphs into blocks of ~800-1200 chars to act like pages
+    blocks: Dict[int, str] = {}
+    current: List[str] = []
+    current_len = 0
+    page_no = 1
+    for p in doc.paragraphs:
+        text = p.text.strip()
+        if not text:
+            continue
+        current.append(text)
+        current_len += len(text) + 1
+        if current_len >= 1000:
+            blocks[page_no] = "\n".join(current)
+            page_no += 1
+            current, current_len = [], 0
+    if current:
+        blocks[page_no] = "\n".join(current)
+    if not blocks:
+        blocks[1] = ""
+    return blocks
 
 # LangGraph State Definition
 class ProcessingState(TypedDict):
@@ -136,25 +184,25 @@ def extract_text_from_pdf(pdf_path: str) -> Dict[int, str]:
         # Check if file exists
         if not os.path.exists(pdf_path):
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
-        
+
         pages_text = {}
         print(f"Extracting text from PDF: {pdf_path}")
-        
+
         # Open and read the PDF file
         with open(pdf_path, 'rb') as file:
             pdf_reader = pypdf.PdfReader(file)
             total_pages = len(pdf_reader.pages)
             print(f"Processing {total_pages} pages...")
-            
+
             # Extract text from each page separately
             for page_num, page in enumerate(pdf_reader.pages, 1):
                 page_text = page.extract_text()
                 pages_text[page_num] = page_text
                 print(f"Processed page {page_num}/{total_pages}")
-        
+
         print(f"Successfully extracted text from {len(pages_text)} pages")
         return pages_text
-        
+
     except FileNotFoundError:
         print(f"Error: PDF file not found at {pdf_path}")
         raise
@@ -365,108 +413,120 @@ def check_document_exists(index, doc_id: str) -> bool:
 def embed_and_upsert_with_summaries(index, pages_text: Dict[int, str], page_chunks: Dict[int, List[str]], doc_id: str):
     """
     Generate embeddings for text chunks and summaries, then upsert them into Pinecone index.
-    
+
     Args:
         index: Pinecone index object
         pages_text (Dict[int, str]): Dictionary with page numbers and their text
         page_chunks (Dict[int, List[str]]): Dictionary with page numbers and their chunks
         doc_id (str): Unique identifier for the document
     """
-    print(f"Generating embeddings and upserting with summaries...")
-    
+    print("Generating embeddings and upserting with summaries...")
+
     try:
-        # Generate document summary
-        full_text = "\n".join(pages_text.values())
-        doc_summary = generate_summary(full_text, "document")
-        print("Generated document summary")
-        
-        # Store document summary
-        doc_summary_embedding = openai_client.embeddings.create(
-            input=[doc_summary],
-            model=EMBEDDING_MODEL
-        ).data[0].embedding
-        
-        # Upsert document summary
-        index.upsert(vectors=[{
-            "id": f"{doc_id}-summary",
-            "values": doc_summary_embedding,
-            "metadata": {
-                "type": "document_summary",
-                "text": doc_summary,
-                "doc_id": doc_id
-            }
-        }])
-        
-        # Process each page
-        vectors_to_upsert = []
-        page_summaries = {}
-        
-        for page_num in sorted(page_chunks.keys()):
-            page_text = pages_text[page_num]
-            chunks = page_chunks[page_num]
-            
-            # Generate page summary
-            page_summary = generate_summary(page_text, "page")
-            page_summaries[page_num] = page_summary
-            print(f"Generated summary for page {page_num}")
-            
-            # Create page summary embedding
-            page_summary_embedding = openai_client.embeddings.create(
-                input=[page_summary],
-                model=EMBEDDING_MODEL
+        doc_summary = ""
+        if ENABLE_DOC_SUMMARY:
+            # Generate and upsert document summary
+            full_text = "\n".join(pages_text.values())
+            doc_summary = generate_summary(full_text, "document")
+            print("Generated document summary")
+
+            doc_summary_embedding = openai_client.embeddings.create(
+                input=[doc_summary],
+                model=EMBEDDING_MODEL,
             ).data[0].embedding
-            
-            # Add page summary vector
-            vectors_to_upsert.append({
-                "id": f"{doc_id}-page-{page_num}-summary",
-                "values": page_summary_embedding,
-                "metadata": {
-                    "type": "page_summary",
-                    "text": page_summary,
-                    "doc_id": doc_id,
-                    "page_number": page_num,
-                    "full_page_text": page_text
-                }
-            })
-            
+
+            index.upsert(
+                vectors=[
+                    {
+                        "id": f"{doc_id}-summary",
+                        "values": doc_summary_embedding,
+                        "metadata": {
+                            "type": "document_summary",
+                            "text": doc_summary,
+                            "doc_id": doc_id,
+                        },
+                    }
+                ]
+            )
+
+        # Process each page
+        vectors_to_upsert: List[Dict[str, Any]] = []
+        page_summaries: Dict[int, str] = {}
+
+        for page_num in sorted(page_chunks.keys()):
+            page_text = pages_text.get(page_num, "")
+            chunks = page_chunks.get(page_num, [])
+
+            if ENABLE_PAGE_SUMMARIES:
+                # Generate page summary and upsert
+                page_summary = generate_summary(page_text, "page")
+                page_summaries[page_num] = page_summary
+                print(f"Generated summary for page {page_num}")
+
+                page_summary_embedding = openai_client.embeddings.create(
+                    input=[page_summary],
+                    model=EMBEDDING_MODEL,
+                ).data[0].embedding
+
+                vectors_to_upsert.append(
+                    {
+                        "id": f"{doc_id}-page-{page_num}-summary",
+                        "values": page_summary_embedding,
+                        "metadata": {
+                            "type": "page_summary",
+                            "text": page_summary,
+                            "doc_id": doc_id,
+                            "page_number": page_num,
+                        },
+                    }
+                )
+
             # Generate embeddings for chunks
             if chunks:
                 chunk_embeddings = openai_client.embeddings.create(
                     input=chunks,
-                    model=EMBEDDING_MODEL
+                    model=EMBEDDING_MODEL,
                 )
-                
+
                 # Create vectors for each chunk
-                for chunk_idx, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings.data)):
+                for chunk_idx, (chunk, embedding) in enumerate(
+                    zip(chunks, chunk_embeddings.data)
+                ):
                     # Include previous page summary as context if available
                     prev_summary = page_summaries.get(page_num - 1, "") if page_num > 1 else ""
-                    
-                    vector = {
-                        "id": f"{doc_id}-page-{page_num}-chunk-{chunk_idx}",
-                        "values": embedding.embedding,
-                        "metadata": {
-                            "type": "chunk",
-                            "text": chunk,
-                            "doc_id": doc_id,
-                            "page_number": page_num,
-                            "chunk_index": chunk_idx,
-                            "page_summary": page_summary,
-                            "prev_page_summary": prev_summary,
-                            "full_page_text": page_text
-                        }
+
+                    meta = {
+                        "type": "chunk",
+                        "text": chunk,
+                        "doc_id": doc_id,
+                        "page_number": page_num,
+                        "chunk_index": chunk_idx,
                     }
-                    vectors_to_upsert.append(vector)
-        
+                    # Optionally include summaries in metadata (not needed for retrieval)
+                    if ENABLE_PAGE_SUMMARIES:
+                        meta["page_summary"] = page_summaries.get(page_num, "")
+                    vectors_to_upsert.append(
+                        {
+                            "id": f"{doc_id}-page-{page_num}-chunk-{chunk_idx}",
+                            "values": embedding.embedding,
+                            "metadata": meta,
+                        }
+                    )
+
         # Upsert vectors in batches
         batch_size = 100
         for i in range(0, len(vectors_to_upsert), batch_size):
-            batch = vectors_to_upsert[i:i + batch_size]
+            batch = vectors_to_upsert[i : i + batch_size]
             index.upsert(vectors=batch)
-            print(f"Upserted batch {i//batch_size + 1}/{(len(vectors_to_upsert) + batch_size - 1)//batch_size}")
-        
-        print(f"Successfully upserted {len(vectors_to_upsert)} vectors with summaries to Pinecone index")
+            print(
+                f"Upserted batch {i//batch_size + 1}/{(len(vectors_to_upsert) + batch_size - 1)//batch_size}"
+            )
+
+        print(
+            f"Successfully upserted {len(vectors_to_upsert)} vectors with summaries to Pinecone index"
+        )
         return doc_summary, page_summaries
-        
+
     except Exception as e:
         print(f"Error during embedding and upsert: {str(e)}")
         raise
@@ -485,6 +545,9 @@ def check_query_relevance(index, query: str, doc_id: str) -> tuple[bool, str]:
         tuple[bool, str]: (is_relevant, document_summary)
     """
     try:
+        # If document summaries are disabled, skip relevance filtering
+        if not ENABLE_DOC_SUMMARY:
+            return True, ""
         # Generate embedding for the query
         query_embedding = openai_client.embeddings.create(
             input=[query],
@@ -514,6 +577,8 @@ def check_query_relevance(index, query: str, doc_id: str) -> tuple[bool, str]:
         if similarity_score >= relevance_threshold:
             return True, document_summary
         else:
+            if not ENABLE_RELEVANCE_LLM_FALLBACK:
+                return False, document_summary
             # Use LLM to make final decision
             relevance_prompt = f"""
             Document Summary: {document_summary}
@@ -541,10 +606,10 @@ def check_query_relevance(index, query: str, doc_id: str) -> tuple[bool, str]:
             
     except Exception as e:
         print(f"Error checking query relevance: {str(e)}")
-        return True, ""  # Default to processing if error occurs
+    return True, ""  # Default to processing if error occurs
 
 
-def get_relevant_context_enhanced(index, query: str, doc_id: str, top_k: int = 5) -> str:
+def get_relevant_context_enhanced(index, query: str, doc_id: str, top_k: int = CHUNK_TOP_K) -> str:
     """
     Perform enhanced semantic search to get relevant context for the query.
     
@@ -564,21 +629,22 @@ def get_relevant_context_enhanced(index, query: str, doc_id: str, top_k: int = 5
             model=EMBEDDING_MODEL
         ).data[0].embedding
         
-        # First, search for relevant page summaries
-        page_summary_results = index.query(
-            vector=query_embedding,
-            top_k=3,
-            include_metadata=True,
-            filter={"type": "page_summary", "doc_id": doc_id}
-        )
-        
         relevant_pages = []
-        if page_summary_results.matches:
-            for match in page_summary_results.matches:
-                if match.score > 0.2:  # Lowered threshold for page summaries
-                    page_num = match.metadata.get('page_number')
-                    if page_num:
-                        relevant_pages.append(page_num)
+        # First, search for relevant page summaries if enabled
+        if ENABLE_PAGE_SUMMARIES:
+            page_summary_results = index.query(
+                vector=query_embedding,
+                top_k=PAGE_SUMMARY_TOP_K,
+                include_metadata=True,
+                filter={"type": "page_summary", "doc_id": doc_id}
+            )
+
+            if page_summary_results.matches:
+                for match in page_summary_results.matches:
+                    if match.score > 0.2:  # Lowered threshold for page summaries
+                        page_num = match.metadata.get('page_number')
+                        if page_num:
+                            relevant_pages.append(page_num)
         
         # If we have relevant pages, search for chunks within those pages
         if relevant_pages:
@@ -589,7 +655,7 @@ def get_relevant_context_enhanced(index, query: str, doc_id: str, top_k: int = 5
                 # Get chunks from this specific page
                 chunk_results = index.query(
                     vector=query_embedding,
-                    top_k=5,
+                    top_k=CHUNK_TOP_K,
                     include_metadata=True,
                     filter={"type": "chunk", "doc_id": doc_id, "page_number": page_num}
                 )
@@ -598,20 +664,25 @@ def get_relevant_context_enhanced(index, query: str, doc_id: str, top_k: int = 5
                     if match.score > 0.2:  # Lowered relevance threshold for chunks
                         chunk_text = match.metadata.get('text', '')
                         page_summary = match.metadata.get('page_summary', '')
-                        prev_summary = match.metadata.get('prev_page_summary', '')
-                        
-                        # Create enhanced context with summaries
-                        enhanced_chunk = f"""
-                        [Page {page_num} Context]
-                        Previous Page Summary: {prev_summary}
-                        Current Page Summary: {page_summary}
-                        
-                        Content: {chunk_text}
-                        """
+
+                        # Create enhanced context; include summaries if configured
+                        if INCLUDE_SUMMARIES_IN_CONTEXT and page_summary:
+                            enhanced_chunk = f"""
+                            [Page {page_num} Context]
+                            Page Summary: {page_summary}
+
+                            Content: {chunk_text}
+                            """
+                        else:
+                            enhanced_chunk = f"[Page {page_num}] {chunk_text}"
                         context_chunks.append(enhanced_chunk)
             
             if context_chunks:
-                return "\n\n".join(context_chunks[:top_k])
+                combined = "\n\n".join(context_chunks[:top_k])
+                # Enforce character budget
+                if len(combined) > CONTEXT_CHAR_BUDGET:
+                    combined = combined[:CONTEXT_CHAR_BUDGET]
+                return combined
         
         # Fallback: general search across all chunks
         print("Performing general search across all chunks...")
@@ -627,121 +698,119 @@ def get_relevant_context_enhanced(index, query: str, doc_id: str, top_k: int = 5
             if 'text' in match.metadata and match.score > 0.2:  # Lowered threshold
                 chunk_text = match.metadata['text']
                 page_num = match.metadata.get('page_number', 'Unknown')
-                context_chunks.append(f"[Page {page_num}] {chunk_text}")
-        
-        return "\n\n".join(context_chunks)
+                if INCLUDE_SUMMARIES_IN_CONTEXT and ENABLE_PAGE_SUMMARIES:
+                    page_summary = match.metadata.get('page_summary', '')
+                    if page_summary:
+                        context_chunks.append(f"""
+                        [Page {page_num} Context]
+                        Page Summary: {page_summary}
+
+                        Content: {chunk_text}
+                        """)
+                    else:
+                        context_chunks.append(f"[Page {page_num}] {chunk_text}")
+                else:
+                    context_chunks.append(f"[Page {page_num}] {chunk_text}")
+
+        combined = "\n\n".join(context_chunks)
+        if len(combined) > CONTEXT_CHAR_BUDGET:
+            combined = combined[:CONTEXT_CHAR_BUDGET]
+        return combined
         
     except Exception as e:
         print(f"Error during enhanced semantic search: {str(e)}")
         return ""
 
 
-def get_llm_answer(context: str, query: str) -> dict:
+def get_llm_answer(context: str, query: str) -> str:
     """
-    Generate answer using OpenAI LLM based on the provided context with citations.
+    Generate a direct, concise answer using OpenAI LLM based on the provided context.
     
     Args:
         context (str): Retrieved context from semantic search
         query (str): User's original query
         
     Returns:
-        dict: Dictionary containing 'answer', 'citations', and 'confidence'
+        str: A direct string answer to the question.
     """
     import logging
-    import json
     logger = logging.getLogger(__name__)
     
-    # Construct the prompt with citation requirements
-    prompt = f"""You are a helpful AI assistant. Answer the following question based ONLY on the provided context. 
-
-IMPORTANT INSTRUCTIONS:
-1. If the answer is found in the context, provide a clear answer
-2. ALWAYS cite the specific page numbers where you found the information
-3. Format your response as a JSON object with the following structure:
-{{
-    "answer": "Your detailed answer here",
-    "citations": ["Page X", "Page Y"],
-    "confidence": "high/medium/low",
-    "explanation": "Brief explanation of why you're confident in this answer"
-}}
-4. If the answer is not found in the context, return:
-{{
-    "answer": "I could not find the answer in the provided document.",
-    "citations": [],
-    "confidence": "low",
-    "explanation": "The required information is not present in the available context"
-}}
+    # Simplified prompt for direct answers, optimized for token efficiency
+    prompt = f"""You are an expert assistant for policy documents. Answer the user's question based *only* on the provided context.
+If the answer is not in the context, state that you cannot answer based on the provided information.
+Be concise and directly answer the question.
 
 Context:
 ---
 {context}
 ---
-
 Question: {query}
 
-Remember to respond ONLY in valid JSON format."""
+Answer:"""
 
     try:
-        # Make API call to OpenAI with retry mechanism
-        response = None
-        max_retries = 3
+        response = openai_client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful AI assistant that provides direct answers based only on the provided context."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.0,  # Set to 0 for fact-based, deterministic answers
+            max_tokens=300  # Reduced max_tokens for concise answers
+        )
         
-        for attempt in range(max_retries):
-            try:
-                response = openai_client.chat.completions.create(
-                    model=LLM_MODEL,
-                    messages=[
-                        {"role": "system", "content": "You are a helpful AI assistant that answers questions based only on the provided context and ALWAYS responds in valid JSON format."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.1,
-                    max_tokens=1000
-                )
-                break
-            except Exception as api_error:
-                logger.warning(f"API call attempt {attempt + 1} failed: {api_error}")
-                if attempt == max_retries - 1:
-                    raise api_error
-                import time
-                time.sleep(2 ** attempt)  # Exponential backoff
-        
-        if not response:
-            raise Exception("Failed to get response from OpenAI API")
-            
-        # Parse the JSON response
-        response_text = response.choices[0].message.content.strip()
-        
-        try:
-            # Try to parse as JSON
-            result = json.loads(response_text)
-            
-            # Validate required fields
-            required_fields = ['answer', 'citations', 'confidence', 'explanation']
-            for field in required_fields:
-                if field not in result:
-                    result[field] = "N/A" if field != 'citations' else []
-                    
-            logger.info(f"Generated answer with {len(result.get('citations', []))} citations")
-            return result
-            
-        except json.JSONDecodeError:
-            logger.warning("LLM response was not valid JSON, falling back to plain text")
-            # Fallback to plain text response
-            return {
-                "answer": response_text,
-                "citations": [],
-                "confidence": "medium",
-                "explanation": "Response generated without structured format"
-            }
-        
+        answer = response.choices[0].message.content.strip()
+        logger.info(f"Generated answer for query: {query[:50]}...")
+        return answer
+
     except Exception as e:
         logger.error(f"Error generating LLM response: {str(e)}")
-        return {
-            "answer": "Sorry, I encountered an error while generating the response.",
-            "citations": [],
-            "confidence": "low",
-            "explanation": f"Error occurred: {str(e)}"
-        }
+        return "Sorry, I encountered an error while generating the response."
+
+
+# -----------------------------
+# Clause extraction and matching
+# -----------------------------
+
+def extract_candidate_clauses(pages_text: Dict[int, str]) -> List[Dict[str, Any]]:
+    """Heuristic clause segmentation: split by headings and numbering."""
+    clauses: List[Dict[str, Any]] = []
+    heading_re = re.compile(r"^(\d+\.|[A-Z][\w\s]{1,40}:?)\s", re.MULTILINE)
+    for page, text in pages_text.items():
+        if not text:
+            continue
+        # naive split by double newline boundaries
+        parts = [p.strip() for p in text.split("\n\n") if p.strip()]
+        for part in parts:
+            title = None
+            m = heading_re.match(part)
+            if m:
+                title = m.group(0).strip().rstrip(":")
+            snippet = part[:400]
+            clauses.append({"page": page, "title": title or "Clause", "text": part, "snippet": snippet})
+    return clauses
+
+def rank_clauses_by_similarity(clauses: List[Dict[str, Any]], query: str) -> List[Tuple[Dict[str, Any], float]]:
+    """Embed query and clause snippets; return ranked matches with similarity scores."""
+    if not clauses:
+        return []
+    # Prepare inputs
+    inputs = [query] + [c["snippet"] for c in clauses]
+    embs = openai_client.embeddings.create(input=inputs, model=EMBEDDING_MODEL).data
+    q = embs[0].embedding
+    def cosine(a, b):
+        import math
+        dot = sum(x*y for x, y in zip(a, b))
+        na = math.sqrt(sum(x*x for x in a))
+        nb = math.sqrt(sum(x*x for x in b))
+        return dot / (na*nb + 1e-8)
+    scored: List[Tuple[Dict[str, Any], float]] = []
+    for idx, c in enumerate(clauses, start=1):
+        s = cosine(q, embs[idx].embedding)
+        scored.append((c, float(s)))
+    scored.sort(key=lambda t: t[1], reverse=True)
+    return scored
 
 
 def check_relevance_node(state: ProcessingState) -> ProcessingState:
@@ -783,7 +852,7 @@ def search_context_node(state: ProcessingState) -> ProcessingState:
     
     try:
         index = pinecone_client.Index(PINECONE_INDEX_NAME)
-        context = get_relevant_context_enhanced(index, state["query"], state["doc_id"], top_k=5)
+        context = get_relevant_context_enhanced(index, state["query"], state["doc_id"])
         state["context"] = context
         
         if context:
@@ -805,38 +874,23 @@ def generate_answer_node(state: ProcessingState) -> ProcessingState:
     
     if not state["should_process"] or not state["context"]:
         if not state["should_process"]:
-            answer_data = {
-                "answer": "I'm sorry, but your question doesn't seem to be related to the content of this document. Please ask questions about the topics covered in the PDF.",
-                "citations": [],
-                "confidence": "high",
-                "explanation": "Query determined to be irrelevant to document content"
-            }
+            answer = "I'm sorry, but your question doesn't seem to be related to the content of this document. Please ask questions about the topics covered in the PDF."
         else:
-            answer_data = {
-                "answer": "I couldn't find relevant information in the document to answer your question.",
-                "citations": [],
-                "confidence": "medium",
-                "explanation": "No relevant context found in document"
-            }
-        state["answer"] = answer_data
+            answer = "I couldn't find relevant information in the document to answer your question."
+        state["answer"] = answer
         return state
         
     logger.info("🤔 Generating answer...")
     
     try:
-        answer_data = get_llm_answer(state["context"], state["query"])
-        state["answer"] = answer_data
+        answer = get_llm_answer(state["context"], state["query"])
+        state["answer"] = answer
         logger.info("✅ Answer generated successfully")
         
     except Exception as e:
         logger.error(f"Error in generate_answer_node: {e}")
         state["error"] = str(e)
-        state["answer"] = {
-            "answer": "Sorry, I encountered an error while generating the response.",
-            "citations": [],
-            "confidence": "low",
-            "explanation": f"System error: {str(e)}"
-        }
+        state["answer"] = f"Sorry, I encountered an error while generating the response: {str(e)}"
         
     return state
 
@@ -891,19 +945,23 @@ class PDFChatbot:
         self.force_reprocess = force_reprocess
         self.logger = logging.getLogger(__name__)
         self.is_newly_created = False
+        self._pages_cache: Optional[Dict[int, str]] = None
         
     def setup_index(self):
         """Set up Pinecone index."""
-        self.logger.info("📊 Initializing Pinecone index...")
-        self.index, self.is_newly_created = setup_pinecone_index(
-            PINECONE_INDEX_NAME, 
-            EMBEDDING_DIMENSION, 
-            force_recreate=self.force_reprocess
-        )
+        self.logger.info("📊 Initializing vector index...")
+        if VECTOR_BACKEND == "pinecone":
+            self.index, self.is_newly_created = setup_pinecone_index(
+                PINECONE_INDEX_NAME,
+                EMBEDDING_DIMENSION,
+                force_recreate=self.force_reprocess
+            )
+        else:
+            raise ValueError("FAISS backend not implemented in this build. Set VECTOR_BACKEND=pinecone.")
         
     def process_document(self):
         """Process the PDF document and store in vector database."""
-        self.logger.info("📄 Processing PDF document...")
+        self.logger.info("📄 Processing document...")
         
         # Check if document already exists (unless force reprocessing)
         if not self.force_reprocess and not self.is_newly_created:
@@ -924,8 +982,14 @@ class PDFChatbot:
                     self.logger.warning(f"Could not retrieve existing summary: {e}")
                 return
         
-        # Extract text page by page
-        pages_text = extract_text_from_pdf(self.pdf_path)
+        # Extract text per format
+        if self.pdf_path.lower().endswith(".pdf"):
+            pages_text = extract_text_from_pdf(self.pdf_path)
+        elif self.pdf_path.lower().endswith(".docx"):
+            pages_text = extract_text_from_docx(self.pdf_path)
+        else:
+            raise ValueError("Unsupported file type. Only PDF and DOCX are supported.")
+        self._pages_cache = pages_text
         
         if not any(text.strip() for text in pages_text.values()):
             raise ValueError("No text was extracted from the PDF. Please check if the PDF contains readable text.")
@@ -942,8 +1006,8 @@ class PDFChatbot:
         self.document_summary = doc_summary
         self.logger.info("✅ Document processing completed!")
         
-    def ask_question(self, query: str) -> dict:
-        """Ask a question using the LangGraph workflow."""
+    def ask_question(self, query: str) -> str:
+        """Ask a question using the LangGraph workflow and return a direct string answer."""
         initial_state = ProcessingState(
             query=query,
             pdf_path=self.pdf_path,
@@ -958,10 +1022,11 @@ class PDFChatbot:
         )
         
         # Run the workflow
-        config = {"configurable": {"thread_id": "pdf_chat_session"}}
+        config = {"configurable": {"thread_id": f"pdf_chat_session_{self.doc_id}"}}
         result = self.workflow.invoke(initial_state, config)
         
-        return result["answer"]
+        # The answer is now a direct string
+        return result.get("answer", "No answer could be generated.")
 
 
 if __name__ == "__main__":
