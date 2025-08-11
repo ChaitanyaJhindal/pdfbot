@@ -360,7 +360,7 @@ async def root():
         "stats": request_stats
     }
 
-@app.get("/health", tags=["Health"])
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["Health"])
 async def health_check():
     """Detailed health check for hackathon monitoring."""
     return {
@@ -368,8 +368,7 @@ async def health_check():
         "timestamp": datetime.utcnow().isoformat(),
         "environment": os.getenv("ENVIRONMENT", "hackrx"),
         "cached_documents": len(chatbots),
-        "temp_files": len(os.listdir(TEMP_DIR)) if os.path.exists(TEMP_DIR) else 0,
-        "stats": request_stats
+        "llm_query_support": "enabled",  # Added to indicate LLM can answer queries outside RAG
     }
 
 @app.post("/hackrx/run", 
