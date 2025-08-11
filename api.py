@@ -400,26 +400,28 @@ async def hackrx_endpoint(
         for i, question in enumerate(request.questions):
             question_start = time.time()
             logger.info(f"❓ Question {i+1}/{len(request.questions)}: {question[:100]}...")
-            
+
             try:
                 # Get answer from chatbot, which is now a direct string
                 answer_text = chatbot.ask_question(question)
-                
+
                 # Clean up the answer
                 answer_text = answer_text.strip()
-                if not answer_text:
-                    answer_text = "Unable to generate an answer for this question."
-                
+                if not answer_text or "doesn't seem to be related" in answer_text:
+                    # Fallback to LLM for external knowledge
+                    logger.info(f"🔄 Fallback to LLM for question {i+1}")
+                    answer_text = query_llm_for_answer(question)
+
                 answers.append(answer_text)
-                
+
                 question_time = time.time() - question_start
                 logger.info(f"✅ Answer {i+1} ready ({question_time:.2f}s): {answer_text[:100]}...")
-                
+
             except Exception as e:
                 logger.error(f"❌ Error processing question {i+1}: {e}")
                 error_answer = f"Error processing question: {str(e)}"
                 answers.append(error_answer)
-        
+
         # Calculate performance metrics
         total_time = time.time() - start_time
         request_stats["successful_requests"] += 1
@@ -427,7 +429,7 @@ async def hackrx_endpoint(
             (request_stats["average_response_time"] * (request_stats["successful_requests"] - 1) + total_time) /
             request_stats["successful_requests"]
         )
-        
+
         logger.info(f"🏁 Request completed: {len(answers)} answers in {total_time:.2f}s")
 
         # Return response in exact HackRx format
@@ -589,3 +591,14 @@ if __name__ == "__main__":
         log_level="info",
         workers=1  # Single worker for hackathon simplicity
     )
+
+def query_llm_for_answer(question: str) -> str:
+    """Query the LLM to answer questions outside the document context."""
+    try:
+        # Placeholder for LLM query logic
+        # Replace this with actual API call or logic to query the LLM
+        logger.info(f"Querying LLM for question: {question}")
+        return f"LLM answer for: {question}"
+    except Exception as e:
+        logger.error(f"Error querying LLM: {e}")
+        return "Unable to generate an answer due to an LLM error."
