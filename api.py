@@ -36,7 +36,7 @@ def setup_hackathon_logging():
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 setup_hackathon_logging()
-logger = logging.getLogger(_name_)
+logger = logging.getLogger(__name__)
 
 # ---------------- FastAPI App ----------------
 app = FastAPI(
@@ -536,7 +536,7 @@ async def shutdown_event():
         logger.error(f"❌ Cleanup error: {e}")
 
 # ---------------- Main ----------------
-if _name_ == "_main_":
+if __name__ == "__main__":
     logger.info("🎮 Starting in development mode for hackathon testing")
     uvicorn.run(
         "api:app",
