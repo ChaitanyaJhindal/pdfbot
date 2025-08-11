@@ -595,13 +595,32 @@ def query_llm_for_answer(question: str) -> str:
         # Log the question being sent to the LLM
         logger.info(f"🔍 Querying LLM for question: {question}")
 
-        # Simulate LLM response (replace with actual API call or logic)
-        llm_response = f"This is an external LLM-generated answer for: {question}"
+        # Example: Replace with actual API call to an LLM (e.g., OpenAI GPT)
+        import requests
+        api_url = "https://api.openai.com/v1/completions"
+        headers = {
+            "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "text-davinci-003",
+            "prompt": question,
+            "max_tokens": 150
+        }
+
+        response = requests.post(api_url, json=payload, headers=headers)
+        response.raise_for_status()
+
+        # Parse the response
+        llm_response = response.json().get("choices", [{}])[0].get("text", "No response from LLM").strip()
 
         # Log the response received from the LLM
         logger.info(f"✅ LLM response: {llm_response}")
 
         return llm_response
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Error querying LLM API: {e}")
+        return "Unable to generate an answer due to an LLM API error."
     except Exception as e:
-        logger.error(f"❌ Error querying LLM: {e}")
-        return "Unable to generate an answer due to an LLM error."
+        logger.error(f"❌ Unexpected error querying LLM: {e}")
+        return "Unable to generate an answer due to an unexpected error."
