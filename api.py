@@ -595,10 +595,16 @@ if __name__ == "__main__":
 def query_llm_for_answer(question: str) -> str:
     """Query the LLM to answer questions outside the document context."""
     try:
-        # Placeholder for LLM query logic
-        # Replace this with actual API call or logic to query the LLM
-        logger.info(f"Querying LLM for question: {question}")
-        return f"LLM answer for: {question}"
+        # Log the question being sent to the LLM
+        logger.info(f"🔍 Querying LLM for question: {question}")
+
+        # Simulate LLM response (replace with actual API call or logic)
+        llm_response = f"This is an external LLM-generated answer for: {question}"
+
+        # Log the response received from the LLM
+        logger.info(f"✅ LLM response: {llm_response}")
+
+        return llm_response
     except Exception as e:
-        logger.error(f"Error querying LLM: {e}")
+        logger.error(f"❌ Error querying LLM: {e}")
         return "Unable to generate an answer due to an LLM error."
