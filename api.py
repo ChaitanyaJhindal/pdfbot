@@ -11,7 +11,7 @@ import tempfile
 from typing import List, Optional, Dict, Any, Union
 from fastapi import FastAPI, HTTPException, status, Depends, Request, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+## Removed HTTPBearer, HTTPAuthorizationCredentials (no auth)
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
 import uvicorn
@@ -65,26 +65,7 @@ cors_config = get_cors_config()
 app.add_middleware(CORSMiddleware, **cors_config)
 
 # Authentication setup for hackathon
-security = HTTPBearer(auto_error=False)
-HACKRX_API_KEY = os.getenv("HACKRX_API_KEY", "80a336acf61ef60c2dc539890a8d50fa768c132923754b0c4c77408ec177cfa8")
-
-def verify_hackrx_auth(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Verify Bearer token for HackRx competition."""
-    if not credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header required",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    if credentials.credentials != HACKRX_API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    return credentials.credentials
+## Removed authentication logic (API is now public)
 
 # HackRx Competition Request/Response models with exact specification
 class HackRxRequest(BaseModel):
@@ -363,7 +344,7 @@ async def startup_event():
     """Initialize the application with hackathon optimizations."""
     logger.info("🚀 Starting HackRx 6.0 PDF Chatbot API")
     logger.info(f"📊 Environment: {os.getenv('ENVIRONMENT', 'hackrx')}")
-    logger.info(f"🔐 Auth: {'Enabled' if HACKRX_API_KEY else 'Disabled'}")
+    logger.info("🔐 Auth: Disabled (public API)")
     logger.info(f"📁 Temp directory: {TEMP_DIR}")
 
 @app.get("/", tags=["Health"])
@@ -397,8 +378,7 @@ async def health_check():
           summary="Process PDF and answer questions",
           description="Main competition endpoint - processes a PDF document and answers questions about it")
 async def hackrx_endpoint(
-    request: HackRxRequest,
-    auth_token: str = Depends(verify_hackrx_auth)
+    request: HackRxRequest
 ):
     """
     HackRx 6.0 Competition Endpoint - Exact specification compliance.
@@ -469,10 +449,9 @@ async def hackrx_endpoint(
 # Versioned aliases for API v1
 @app.post("/api/v1/hackrx/run", response_model=HackRxResponse, tags=["HackRx Competition"])
 async def hackrx_endpoint_v1(
-    request: HackRxRequest,
-    auth_token: str = Depends(verify_hackrx_auth)
+    request: HackRxRequest
 ):
-    return await hackrx_endpoint(request, auth_token)
+    return await hackrx_endpoint(request)
 
 @app.post("/upload",
           response_model=HackRxResponse,
@@ -481,8 +460,7 @@ async def hackrx_endpoint_v1(
           description="Upload a PDF file and ask questions about it - alternative to URL-based processing")
 async def upload_pdf_endpoint(
     file: UploadFile = File(..., description="PDF file to upload and process"),
-    questions: str = Form(..., description="JSON array of questions as string"),
-    auth_token: str = Depends(verify_hackrx_auth)
+    questions: str = Form(..., description="JSON array of questions as string")
 ):
     """
     File Upload Endpoint - Upload PDF and get answers to questions.
@@ -577,10 +555,9 @@ async def upload_pdf_endpoint(
 @app.post("/api/v1/upload", response_model=HackRxResponse, tags=["File Upload"])
 async def upload_pdf_endpoint_v1(
     file: UploadFile = File(..., description="PDF file to upload and process"),
-    questions: str = Form(..., description="JSON array of questions as string"),
-    auth_token: str = Depends(verify_hackrx_auth)
+    questions: str = Form(..., description="JSON array of questions as string")
 ):
-    return await upload_pdf_endpoint(file, questions, auth_token)
+    return await upload_pdf_endpoint(file, questions)
 
 # Hackathon cleanup on shutdown
 @app.on_event("shutdown")
