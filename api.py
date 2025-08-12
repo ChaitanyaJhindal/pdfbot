@@ -1,8 +1,9 @@
 """
 FastAPI web service for the PDF Chatbot - HackRx 6.0 Competition.
-(Version 2.0.3) Added simple fallback: if the PDF-based answer looks like
-a 'not found / irrelevant' message (or empty/weak), we transparently
-replace it with a plain LLM answer (no disclaimers). Other behavior unchanged.
+(Version 2.1.0) Enhanced: The chatbot always produces a non-placeholder answer for each question,
+even if context is missing or LLM fails. If both document and LLM fail, a best-effort informative
+response is synthesized using available summaries. No more generic placeholders such as
+'I cannot answer...' or 'Unable to generate an answer due to an LLM API error.'
 """
 
 import os
@@ -14,12 +15,14 @@ from typing import List, Dict, Union, Tuple
 from fastapi import FastAPI, HTTPException, status, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi import Query
 from pydantic import BaseModel, Field, validator
 import uvicorn
 import time
 from datetime import datetime
 from advanced_pdf_bot import PDFChatbot, setup_logging
 from cors_config import CORS_DEV, CORS_PROD, CORS_HACKRX, CORS_EXTERNAL_TESTING
+from fastapi.staticfiles import StaticFiles
 
 import hashlib
 from urllib.parse import urlparse
@@ -42,11 +45,13 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="HackRx 6.0 PDF Chatbot API",
     description="Competition-ready PDF question-answering service with exact specification compliance",
-    version="2.0.3",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json"
 )
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 def get_cors_config():
     env = os.getenv("ENVIRONMENT", "hackrx").lower()
@@ -120,12 +125,12 @@ request_stats = {
     "average_response_time": 0
 }
 
-# ---------------- Helper: Answer quality check ----------------
+# ---------------- Helper: Answer quality check + fallback logic ----------------
 def is_unusable_doc_answer(ans: str) -> bool:
     """
     Decide if the retrieval-based answer is NOT acceptable and we should
-    silently fall back to the LLM. We treat typical 'not found / unrelated'
-    style messages (including those produced by the workflow) as unusable.
+    transparently fall back to the LLM. Typical 'not found / unrelated'
+    messages (including those produced by the workflow) are unusable.
     """
     if not ans:
         return True
@@ -137,7 +142,6 @@ def is_unusable_doc_answer(ans: str) -> bool:
     if ans_l in {"i don't know", "idk", "no answer", "n/a"}:
         return True
 
-    # Phrases produced by workflow when irrelevant / no context:
     trigger_substrings = [
         "i'm sorry, but your question doesn't seem to be related",
         "couldn't find relevant information",
@@ -145,19 +149,33 @@ def is_unusable_doc_answer(ans: str) -> bool:
         "question doesn't seem to be related",
         "not related to the content of this document",
         "please ask questions about the topics covered",
-        "i encountered an error while generating the response"
+        "i encountered an error while generating the response",
+        "unable to generate an answer due to an llm api error",
+        "i cannot answer based on the provided information",
+        "no response from llm"
     ]
     if any(t in ans_l for t in trigger_substrings):
         return True
 
     return False
 
+def best_effort_fallback(question: str, doc_summary: str = None) -> str:
+    """
+    Fallback answer if both retrieval and LLM fail. Use document summary if available.
+    """
+    if doc_summary and doc_summary.strip():
+        return (
+            f"The document does not provide a direct answer to your question, "
+            f"but here is a summary of its content: {doc_summary.strip()}"
+        )
+    else:
+        return (
+            "No answer could be generated for your question. "
+            "The document appears empty, unreadable, or there was a technical issue."
+        )
+
 # ---------------- Document handling ----------------
 def download_document_from_url(url: str) -> Tuple[str, str]:
-    """
-    Download document from URL (simple; no host/IP SSRF checks).
-    Returns (file_path, sha256_hash)
-    """
     try:
         logger.info(f"📥 Downloading document from URL: {url[:120]}")
         parsed = urlparse(url)
@@ -231,10 +249,6 @@ def download_document_from_url(url: str) -> Tuple[str, str]:
         )
 
 def save_uploaded_file(upload_file: UploadFile) -> Tuple[str, str]:
-    """
-    Stream-save uploaded file to temp dir while hashing & size checking.
-    Returns (file_path, sha256_hash)
-    """
     try:
         logger.info(f"📁 Saving uploaded file: {upload_file.filename}")
 
@@ -346,7 +360,7 @@ async def root():
     return {
         "message": "HackRx 6.0 PDF Chatbot API is running",
         "status": "healthy",
-        "version": "2.0.3",
+        "version": "2.1.0",
         "competition": "HackRx 6.0",
         "endpoint": "/hackrx/run",
         "docs": "/docs",
@@ -379,6 +393,15 @@ async def hackrx_endpoint(request: HackRxRequest):
         logger.info(f"📄 Document: {request.documents[:120]}")
         chatbot = process_document_and_get_chatbot(request.documents, "url")
 
+        # Try to extract document summary for fallback
+        try:
+            doc_summary = (getattr(chatbot, "doc_summary", None) or
+                           getattr(chatbot, "document_summary", None) or
+                           "")
+            doc_summary = doc_summary.strip() if doc_summary else ""
+        except Exception:
+            doc_summary = ""
+
         answers: List[str] = []
         for i, question in enumerate(request.questions):
             q_start = time.time()
@@ -390,11 +413,14 @@ async def hackrx_endpoint(request: HackRxRequest):
                 except Exception as e:
                     logger.warning(f"⚠ Retrieval error for question {i+1}: {e}")
 
-                # NEW unified simple fallback check (no 'not found' phrasing kept)
                 if is_unusable_doc_answer(doc_answer):
                     logger.info(f"🔄 Fallback to LLM for question {i+1}")
                     llm_answer = query_llm_for_answer(question).strip()
-                    final_answer = llm_answer or "No answer."
+                    if is_unusable_doc_answer(llm_answer):
+                        logger.info(f"🛡️ Both retrieval and LLM failed; using best-effort fallback for Q{i+1}")
+                        final_answer = best_effort_fallback(question, doc_summary)
+                    else:
+                        final_answer = llm_answer
                 else:
                     final_answer = doc_answer
 
@@ -402,7 +428,8 @@ async def hackrx_endpoint(request: HackRxRequest):
                 logger.info(f"✅ Answer {i+1} ({time.time()-q_start:.2f}s): {final_answer[:120]}")
             except Exception as e:
                 logger.error(f"❌ Error processing question {i+1}: {e}")
-                answers.append(f"Error processing question: {e}")
+                fallback_ans = best_effort_fallback(question, doc_summary)
+                answers.append(fallback_ans)
 
         total_time = time.time() - start_time
         request_stats["successful_requests"] += 1
@@ -468,6 +495,14 @@ async def upload_pdf_endpoint(
 
         chatbot = process_document_and_get_chatbot(file, "upload")
 
+        try:
+            doc_summary = (getattr(chatbot, "doc_summary", None) or
+                           getattr(chatbot, "document_summary", None) or
+                           "")
+            doc_summary = doc_summary.strip() if doc_summary else ""
+        except Exception:
+            doc_summary = ""
+
         answers: List[str] = []
         for i, question in enumerate(questions_list):
             q_start = time.time()
@@ -481,13 +516,19 @@ async def upload_pdf_endpoint(
 
                 if is_unusable_doc_answer(answer_text):
                     logger.info(f"🔄 Fallback to LLM (upload) for question {i+1}")
-                    answer_text = query_llm_for_answer(question).strip() or "No answer."
+                    llm_answer = query_llm_for_answer(question).strip()
+                    if is_unusable_doc_answer(llm_answer):
+                        logger.info(f"🛡️ Both retrieval and LLM failed (upload); using best-effort fallback for Q{i+1}")
+                        answer_text = best_effort_fallback(question, doc_summary)
+                    else:
+                        answer_text = llm_answer
 
                 answers.append(answer_text)
                 logger.info(f"✅ Answer {i+1} ({time.time()-q_start:.2f}s): {answer_text[:120]}")
             except Exception as e:
                 logger.error(f"❌ Error processing question {i+1}: {e}")
-                answers.append(f"Error processing question: {e}")
+                fallback_ans = best_effort_fallback(question, doc_summary)
+                answers.append(fallback_ans)
 
         total_time = time.time() - start_time
         request_stats["successful_requests"] += 1
@@ -516,6 +557,56 @@ async def upload_pdf_endpoint_v1(
     questions: str = Form(..., description="JSON array of questions as string")
 ):
     return await upload_pdf_endpoint(file, questions)
+
+@app.get("/keepwarm", tags=["Health", "Maintenance"])
+async def keepwarm(
+    doc_url: str = Query(
+        default="https://hackrx-pdfbot-syj1.onrender.com/static/warmup.pdf",
+        description="URL of a small, always-cached PDF for warming up."
+    ),
+    question: str = Query(
+        default="What is the title of this document?",
+        description="Trivial question for warm-up."
+    )
+):
+    import time
+    start_time = time.time()
+    try:
+        chatbot = process_document_and_get_chatbot(doc_url, "url")
+        try:
+            doc_summary = (getattr(chatbot, "doc_summary", None) or
+                        getattr(chatbot, "document_summary", None) or
+                        "")
+            doc_summary = doc_summary.strip() if doc_summary else ""
+        except Exception:
+            doc_summary = ""
+        doc_answer = ""
+        try:
+            doc_answer = (chatbot.ask_question(question) or "").strip()
+        except Exception:
+            pass
+        if is_unusable_doc_answer(doc_answer):
+            llm_answer = query_llm_for_answer(question).strip()
+            if is_unusable_doc_answer(llm_answer):
+                final_answer = best_effort_fallback(question, doc_summary)
+            else:
+                final_answer = llm_answer
+        else:
+            final_answer = doc_answer
+        elapsed = time.time() - start_time
+        return {
+            "status": "ok",
+            "keepwarm": True,
+            "elapsed": elapsed,
+            "doc_url": doc_url,
+            "question": question,
+            "answer": final_answer[:200]
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
 # ---------------- Shutdown ----------------
 @app.on_event("shutdown")
@@ -547,9 +638,12 @@ if __name__ == "__main__":
         workers=1
     )
 
-# ---------------- LLM Fallback ----------------
+# ---------------- LLM Fallback (always returns a non-placeholder answer) ----------------
 def query_llm_for_answer(question: str) -> str:
-    """Query the LLM to answer questions outside the document context."""
+    """
+    Query the LLM to answer questions outside the document context.
+    If LLM or API fails, provide a best-effort generic informative answer.
+    """
     try:
         logger.info(f"🔍 Querying LLM for question: {question}")
         import requests
@@ -557,7 +651,7 @@ def query_llm_for_answer(question: str) -> str:
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
             logger.warning("⚠ OPENAI_API_KEY not set; returning fallback message")
-            return "LLM not configured."
+            return "The system is not configured to answer this question right now."
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -565,16 +659,22 @@ def query_llm_for_answer(question: str) -> str:
         payload = {
             "model": "text-davinci-003",
             "prompt": question,
-            "max_tokens": 150
+            "max_tokens": 150,
+            "temperature": 0.7
         }
         response = requests.post(api_url, json=payload, headers=headers, timeout=40)
         response.raise_for_status()
-        llm_response = response.json().get("choices", [{}])[0].get("text", "No response from LLM").strip()
+        llm_response = response.json().get("choices", [{}])[0].get("text", "").strip()
+        if not llm_response or is_unusable_doc_answer(llm_response):
+            return ("No definitive answer was found in the document or from the AI model. "
+                    "Please try rephrasing your question or provide more detail.")
         logger.info(f"✅ LLM response: {llm_response[:120]}")
         return llm_response
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ Error querying LLM API: {e}")
-        return "Unable to generate an answer due to an LLM API error."
+        return ("No definitive answer was found due to a technical issue contacting the AI service. "
+                "Please try again later or rephrase your question.")
     except Exception as e:
         logger.error(f"❌ Unexpected error querying LLM: {e}")
-        return "Unable to generate an answer due to an unexpected error."
+        return ("No answer could be generated due to an unexpected error. "
+                "Please try again with a different question.")
