@@ -570,8 +570,8 @@ async def keepwarm(
         description="URL of a small, always-cached PDF for warming up."
     ),
     question: str = Query(
-        default="What is the title of this document?",
-        description="Trivial question for warm-up."
+        default="What is Adobe Acrobat PDF Files?",
+        description="Trivial question for warm-up. Must match PDF content exactly for retrieval to succeed."
     )
 ):
     import time
