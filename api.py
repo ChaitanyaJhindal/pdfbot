@@ -558,7 +558,12 @@ async def upload_pdf_endpoint_v1(
 ):
     return await upload_pdf_endpoint(file, questions)
 
-@app.get("/keepwarm", tags=["Health", "Maintenance"])
+# @app.get("/keepwarm", tags=["Health", "Maintenance"])
+@app.api_route(
+    "/keepwarm",
+    methods=["GET", "HEAD"],
+    tags=["Health", "Maintenance"]
+)
 async def keepwarm(
     doc_url: str = Query(
         default="https://hackrx-pdfbot-syj1.onrender.com/static/warmup.pdf",
